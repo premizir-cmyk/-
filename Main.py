@@ -1,22 +1,24 @@
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ChatMemberStatus
 
-# Токен вашего бота из сообщения
-TOKEN = "8961221944:AAHbwH5tnsfKPz3g0f5-vIFScXqwJJti77E"
+# Токен берется из переменных окружения хостинга
+TOKEN = os.getenv("BOT_TOKEN")
 
 # ID вашего канала и чата
 CHANNEL_ID = -1004456753608
 TARGET_CHAT_ID = -1004377702164
 
-# Обновленная ссылка на ваш канал для кнопки
+# Ссылка на канал для кнопки
 CHANNEL_URL = "https://t.me/otzovzaden" 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Убрали фильтр по типу контента, теперь ловит любые сообщения в нужном чате
 @dp.message(F.chat.id == TARGET_CHAT_ID)
 async def check_subscription(message: Message):
     # Игнорируем сообщения от самого бота
@@ -29,7 +31,7 @@ async def check_subscription(message: Message):
         
         # Если пользователь не подписан (статусы: left, kicked)
         if member.status in [ChatMemberStatus.LEFT, ChatMemberStatus.KICKED]:
-            # Удаляем сообщение пользователя, чтобы он не мог писать
+            # Удаляем сообщение пользователя
             await message.delete()
             
             # Формируем упоминание пользователя
@@ -53,7 +55,8 @@ async def check_subscription(message: Message):
             await warning_msg.delete()
             
     except Exception as e:
-        logging.error(f"Ошибка при проверке подписки: {e}")
+        # Если возникнет ошибка, она покажется в логах хостинга (например, если бот не админ в канале)
+        print(f"ОШИБКА В КАНАЛЕ/ЧАТЕ: {e}")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
