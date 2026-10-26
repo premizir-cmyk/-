@@ -5,8 +5,7 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Твой токен бота
-BOT_TOKEN = "8501498168:AAFHfwrHuUlshb725hDrrFAXMBIHzMdSIrE"
-
+BOT_TOKEN = "8501498168:AAHvnV8lHcopmTcjtcUF3ww8yk-3F3CO7AE"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
