@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Твой токен бота
+# Токен бота
 BOT_TOKEN = "8501498168:AAHvnV8lHcopmTcjtcUF3ww8yk-3F3CO7AE"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -19,11 +19,12 @@ class GameState:
         self.night_actions = {}  # {"Мафия": target_id, "Доктор": target_id, "Комиссар": target_id}
         self.day_votes = {}  # {voter_id: target_id}
         self.bot_username = ""
+        self.last_words_user = None  # ID игрока, ожидающего ввод предсмертного слова
 
 game = GameState()
 
 
-# Распределение ролей (1 мафия для стабильности в небольших группах, доктор, комиссар, остальные мирные)
+# Распределение ролей
 def assign_roles(players_dict):
     user_ids = list(players_dict.keys())
     total = len(user_ids)
@@ -58,35 +59,91 @@ async def check_win_conditions():
     return False
 
 
-# --- Шаг 1: Запуск набора в чате ---
+# --- Команда /stop (Отмена игры / набора) ---
+@dp.message(Command("stop"))
+async def cmd_stop(message: types.Message):
+    if not game.is_registration and not game.is_game_active:
+        await message.answer("❌ Сейчас нет активной игры или набора.")
+        return
+    
+    game.is_registration = False
+    game.is_game_active = False
+    game.players.clear()
+    game.night_actions.clear()
+    game.day_votes.clear()
+    game.last_words_user = None
+    
+    await message.answer("🛑 **Игра успешно остановлена / набор отменен.**", parse_mode="Markdown")
+
+
+# --- Защита чата (только живые игроки могут писать во время игры) ---
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def group_message_filter(message: types.Message):
+    if message.text and message.text.startswith('/'):
+        return  # Пропускаем команды
+    
+    if game.is_game_active:
+        user_id = message.from_user.id
+        # Если пользователя нет в игре или он мертв — удаляем сообщение
+        if user_id not in game.players or not game.players[user_id]['is_alive']:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+
+# --- Обработка личных сообщений (Регистрация + Предсмертные слова) ---
+@dp.message(F.chat.type == "private")
+async def private_message_handler(message: types.Message):
+    user_id = message.from_user.id
+
+    # Проверка, ждем ли мы предсмертное слово от этого игрока
+    if game.last_words_user == user_id:
+        game.last_words_user = None
+        text = message.text
+        user_name = message.from_user.first_name
+        username = f"@{message.from_user.username}" if message.from_user.username else user_name
+        
+        if game.chat_id:
+            await bot.send_message(
+                game.chat_id,
+                f"📜 **Предсмертное слово от {username} ({user_name}):**\n«{text}»",
+                parse_mode="Markdown"
+            )
+        await message.answer("✅ Ваше предсмертное слово передано в город.")
+        return
+
+    # Регистрация по реферальной ссылке
+    if message.text and "join" in message.text:
+        if not game.is_registration:
+            await message.answer("❌ Набор в игру сейчас не идет или уже завершен!")
+            return
+        
+        user_name = message.from_user.first_name
+
+        if user_id in game.players:
+            await message.answer("⚠️ Вы уже зарегистрированы в игре! Возвращайтесь в группу.")
+            return
+
+        game.players[user_id] = {"name": user_name, "role": None, "is_alive": True}
+        await message.answer("✅ **Вы успешно зарегистрированы в Мафию!**\n\nОжидайте старта игры в группе.", parse_mode="Markdown")
+        
+        if game.chat_id:
+            await bot.send_message(
+                game.chat_id, 
+                f"➕ К игре присоединился **{user_name}**! (Всего: {len(game.players)})",
+                parse_mode="Markdown"
+            )
+        return
+    
+    await message.answer("Привет! Я бот для игры в Мафию. Добавь меня в группу и напиши там `/start` для запуска набора.")
+
+
+# --- Шаг 1: Запуск набора в группе ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.chat.type == "private":
-        if message.text and "join" in message.text:
-            if not game.is_registration:
-                await message.answer("❌ Набор в игру сейчас не идет или уже завершен!")
-                return
-            
-            user_id = message.from_user.id
-            user_name = message.from_user.first_name
-
-            if user_id in game.players:
-                await message.answer("⚠️ Вы уже зарегистрированы в игре! Возвращайтесь в группу.")
-                return
-
-            game.players[user_id] = {"name": user_name, "role": None, "is_alive": True}
-            await message.answer("✅ **Вы успешно зарегистрированы в Мафию!**\n\nОжидайте старта игры в группе.", parse_mode="Markdown")
-            
-            if game.chat_id:
-                await bot.send_message(
-                    game.chat_id, 
-                    f"➕ К игре присоединился **{user_name}**! (Всего: {len(game.players)})",
-                    parse_mode="Markdown"
-                )
-            return
-        
-        await message.answer("Привет! Я бот для игры в Мафию. Добавь меня в группу и напиши там `/start` для запуска набора.")
-        return
+        return  # ЛС обрабатывается в private_message_handler
 
     # Запуск набора в группе
     if not game.is_registration and not game.is_game_active:
@@ -104,7 +161,8 @@ async def cmd_start(message: types.Message):
         await message.answer(
             "🎭 **Набор в игру 'Мафия' открыт!**\n\n"
             "Чтобы участвовать, нажмите на кнопку ниже (нужно будет нажать 'Запустить' в ЛС с ботом).\n\n"
-            "📌 Как наберете игроков, напишите второй раз **/start** в этот чат для старта игры!",
+            "📌 Как наберете игроков, напишите второй раз **/start** в этот чат для старта игры!\n"
+            "🛑 Для отмены используйте **/stop**.",
             reply_markup=builder.as_markup(),
             parse_mode="Markdown"
         )
@@ -140,8 +198,10 @@ async def cmd_start(message: types.Message):
         await message.answer("⚠️ Игра уже идет полным ходом!")
 
 
-# --- Фаза Ночи ---
+# --- Фаза Ночи (с таймаутом 45 сек) ---
 async def start_night_phase():
+    if not game.is_game_active:
+        return
     game.night_actions.clear()
     await bot.send_message(
         game.chat_id, 
@@ -173,12 +233,24 @@ async def start_night_phase():
             try:
                 await bot.send_message(
                     uid,
-                    f"🌙 Ночь на дворе. Ваша роль: **{role}**.\nВыберите цель:",
+                    f"🌙 Ночь на дворе. Ваша роль: **{role}**.\nУ вас есть **45 секунд** на ход:",
                     reply_markup=builder.as_markup(),
                     parse_mode="Markdown"
                 )
             except Exception:
                 pass
+
+    # Ожидание ходов ночью (максимум 45 секунд)
+    for _ in range(45):
+        await asyncio.sleep(1)
+        if not game.is_game_active:
+            return
+        active_roles_alive = {p['role'] for p in game.players.values() if p['is_alive'] and p['role'] in ['Мафия', 'Доктор', 'Комиссар']}
+        if set(game.night_actions.keys()) >= active_roles_alive:
+            break
+    
+    if game.is_game_active:
+        await process_night_results()
 
 
 # --- Обработка ночных выборов в ЛС ---
@@ -209,34 +281,74 @@ async def cb_night_action(callback: types.CallbackQuery):
 
     await callback.answer("Ход принят!")
 
-    active_roles_alive = {p['role'] for p in game.players.values() if p['is_alive'] and p['role'] in ['Мафия', 'Доктор', 'Комиссар']}
-    if set(game.night_actions.keys()) >= active_roles_alive:
-        await process_night_results()
 
-
-# --- Итоги ночи и переход к дню ---
+# --- Итоги ночи и предсмертное слово ---
 async def process_night_results():
     shot_target = game.night_actions.get('Мафия')
     healed_target = game.night_actions.get('Доктор')
 
     await bot.send_message(game.chat_id, "☀️ **Наступает утро!** Город просыпается...", parse_mode="Markdown")
 
+    killed_id = None
     if shot_target and shot_target != healed_target:
         game.players[shot_target]['is_alive'] = False
-        killed_name = game.players[shot_target]['name']
-        await bot.send_message(game.chat_id, f"💀 Этим утром город не досчитался игрока **{killed_name}**.", parse_mode="Markdown")
+        killed_id = shot_target
+        killed_name = game.players[killed_id]['name']
+        killed_role = game.players[killed_id]['role']
+
+        await bot.send_message(
+            game.chat_id, 
+            f"💀 Этим утром город не досчитался игрока **{killed_name}**.\nЕго роль была: **{killed_role}**.", 
+            parse_mode="Markdown"
+        )
+
+        # Даем убитому мафией игроку 20 секунд на предсмертное слово в ЛС
+        game.last_words_user = killed_id
+        try:
+            await bot.send_message(
+                killed_id,
+                "💀 Вы были убиты этой ночью!\nУ вас есть **20 секунд**, чтобы написать **предсмертное послание** в ответном сообщении здесь:",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
+        for _ in range(20):
+            await asyncio.sleep(1)
+            if game.last_words_user != killed_id:
+                break  # Игрок отправил сообщение
+        
+        if game.last_words_user == killed_id:
+            game.last_words_user = None  # Время вышло, сбрасываем
     else:
         await bot.send_message(game.chat_id, "🛡️ Ночь прошла успешно для горожан! Никто не погиб (либо доктор вовремя вылечил раненого).", parse_mode="Markdown")
 
     if await check_win_conditions():
         return
 
-    # Запуск дневного голосования
-    await start_day_voting()
+    # Переход к фазе обсуждения (1 минута)
+    await start_discussion_phase()
 
 
-# --- Фаза Дневного голосования (Линч) ---
+# --- Фаза Обсуждения (1 минута) ---
+async def start_discussion_phase():
+    if not game.is_game_active:
+        return
+    await bot.send_message(
+        game.chat_id,
+        "🗣 **Время обсуждений!** У вас есть **1 минута**, чтобы обсудить события ночи и найти мафию.",
+        parse_mode="Markdown"
+    )
+    await asyncio.sleep(60)  # 1 минута обсуждения
+    
+    if game.is_game_active:
+        await start_day_voting()
+
+
+# --- Фаза Дневного голосования (45 секунд) ---
 async def start_day_voting():
+    if not game.is_game_active:
+        return
     game.day_votes.clear()
     alive_players = {uid: p['name'] for uid, p in game.players.items() if p['is_alive']}
 
@@ -245,12 +357,30 @@ async def start_day_voting():
         builder.button(text=f"⚖️ Изгнать {name}", callback_data=f"vote:{uid}")
     builder.adjust(1)
 
-    await bot.send_message(
+    voting_msg = await bot.send_message(
         game.chat_id,
-        "💬 **Время обсуждений!** Город должен решить, кого изгнать на дневном суде. Сделайте свой выбор кнопкой ниже:",
+        "💬 **Началось голосование (Линч)!** У вас есть **45 секунд**, чтобы сделать выбор:",
         reply_markup=builder.as_markup(),
         parse_mode="Markdown"
     )
+
+    # Таймер голосования (45 секунд)
+    for _ in range(45):
+        await asyncio.sleep(1)
+        if not game.is_game_active:
+            return
+        alive_count = sum(1 for p in game.players.values() if p['is_alive'])
+        if len(game.day_votes) >= alive_count:
+            break
+
+    # Убираем клавиатуру голосования
+    try:
+        await bot.edit_message_reply_markup(chat_id=game.chat_id, message_id=voting_msg.message_id, reply_markup=None)
+    except Exception:
+        pass
+
+    if game.is_game_active:
+        await process_day_results()
 
 
 @dp.callback_query(F.data.startswith("vote:"))
@@ -269,12 +399,6 @@ async def cb_day_vote(callback: types.CallbackQuery):
     target_name = game.players[target_id]['name']
 
     await callback.answer(f"Вы проголосовали против: {target_name}")
-
-    alive_count = sum(1 for p in game.players.values() if p['is_alive'])
-
-    # Если все живые проголосовали — подводим итоги дня
-    if len(game.day_votes) >= alive_count:
-        await process_day_results()
 
 
 async def process_day_results():
@@ -299,29 +423,17 @@ async def process_day_results():
                 parse_mode="Markdown"
             )
         else:
-            await bot.send_message(game.chat_id, "⚖️ Голоса разделились поровну, сегодня никто не изгнан.")
+            await bot.send_message(game.chat_id, "⚖️ **Мнения жителей разошлись!** Голоса разделились поровну, сегодня никто не изгнан.")
 
     if await check_win_conditions():
         return
 
-    # Кнопка для перехода к следующей ночи
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🌙 Наступить ночь", callback_data="next_night")
+    # Автоматический переход к ночи через 5 секунд
+    await bot.send_message(game.chat_id, "🌇 Солнце садится... Следующая ночь начнется через 5 секунд.")
+    await asyncio.sleep(5)
     
-    await bot.send_message(
-        game.chat_id, 
-        "🌇 Солнце садится... Нажмите кнопку, чтобы наступила ночь:",
-        reply_markup=builder.as_markup()
-    )
-
-
-@dp.callback_query(F.data == "next_night")
-async def cb_next_night(callback: types.CallbackQuery):
-    if not game.is_game_active:
-        await callback.answer("Игра завершена!", show_alert=True)
-        return
-    await callback.message.delete()
-    await start_night_phase()
+    if game.is_game_active:
+        await start_night_phase()
 
 
 async def main():
