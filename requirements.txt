@@ -1,2 +1,1 @@
-pip install aiogram asyncio
-
+aiogram>=3.0.0
