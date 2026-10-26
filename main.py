@@ -62,10 +62,6 @@ async def check_win_conditions():
 # --- Команда /stop (Отмена игры / набора) ---
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
-    if not game.is_registration and not game.is_game_active:
-        await message.answer("❌ Сейчас нет активной игры или набора.")
-        return
-    
     game.is_registration = False
     game.is_game_active = False
     game.players.clear()
@@ -433,7 +429,8 @@ async def process_day_results():
 
 
 async def main():
-    await dp.start_polling(bot)
+    # drop_pending_updates=True сбрасывает зависшую очередь старых сообщений при запуске
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
