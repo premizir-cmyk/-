@@ -84,7 +84,6 @@ async def group_message_filter(message: types.Message):
     
     if game.is_game_active:
         user_id = message.from_user.id
-        # Если пользователя нет в игре или он мертв — удаляем сообщение
         if user_id not in game.players or not game.players[user_id]['is_alive']:
             try:
                 await message.delete()
@@ -92,29 +91,13 @@ async def group_message_filter(message: types.Message):
                 pass
 
 
-# --- Обработка личных сообщений (Регистрация + Предсмертные слова) ---
-@dp.message(F.chat.type == "private")
-async def private_message_handler(message: types.Message):
+# --- Обработка ЛС: Регистрация (join) и Предсмертные слова ---
+@dp.message(F.chat.type == "private", Command("start"))
+async def private_cmd_start(message: types.Message):
     user_id = message.from_user.id
+    text = message.text or ""
 
-    # Проверка, ждем ли мы предсмертное слово от этого игрока
-    if game.last_words_user == user_id:
-        game.last_words_user = None
-        text = message.text
-        user_name = message.from_user.first_name
-        username = f"@{message.from_user.username}" if message.from_user.username else user_name
-        
-        if game.chat_id:
-            await bot.send_message(
-                game.chat_id,
-                f"📜 **Предсмертное слово от {username} ({user_name}):**\n«{text}»",
-                parse_mode="Markdown"
-            )
-        await message.answer("✅ Ваше предсмертное слово передано в город.")
-        return
-
-    # Регистрация по реферальной ссылке
-    if message.text and "join" in message.text:
+    if "join" in text:
         if not game.is_registration:
             await message.answer("❌ Набор в игру сейчас не идет или уже завершен!")
             return
@@ -135,16 +118,33 @@ async def private_message_handler(message: types.Message):
                 parse_mode="Markdown"
             )
         return
-    
+
     await message.answer("Привет! Я бот для игры в Мафию. Добавь меня в группу и напиши там `/start` для запуска набора.")
 
 
-# --- Шаг 1: Запуск набора в группе ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    if message.chat.type == "private":
-        return  # ЛС обрабатывается в private_message_handler
+@dp.message(F.chat.type == "private")
+async def private_message_handler(message: types.Message):
+    user_id = message.from_user.id
 
+    # Проверка предсмертного слова
+    if game.last_words_user == user_id:
+        game.last_words_user = None
+        text = message.text
+        user_name = message.from_user.first_name
+        username = f"@{message.from_user.username}" if message.from_user.username else user_name
+        
+        if game.chat_id:
+            await bot.send_message(
+                game.chat_id,
+                f"📜 **Предсмертное слово от {username} ({user_name}):**\n«{text}»",
+                parse_mode="Markdown"
+            )
+        await message.answer("✅ Ваше предсмертное слово передано в город.")
+
+
+# --- Шаг 1: Запуск набора и старт игры в ГРУППЕ ---
+@dp.message(F.chat.type.in_({"group", "supergroup"}), Command("start"))
+async def group_cmd_start(message: types.Message):
     # Запуск набора в группе
     if not game.is_registration and not game.is_game_active:
         game.is_registration = True
@@ -316,17 +316,16 @@ async def process_night_results():
         for _ in range(20):
             await asyncio.sleep(1)
             if game.last_words_user != killed_id:
-                break  # Игрок отправил сообщение
+                break
         
         if game.last_words_user == killed_id:
-            game.last_words_user = None  # Время вышло, сбрасываем
+            game.last_words_user = None
     else:
         await bot.send_message(game.chat_id, "🛡️ Ночь прошла успешно для горожан! Никто не погиб (либо доктор вовремя вылечил раненого).", parse_mode="Markdown")
 
     if await check_win_conditions():
         return
 
-    # Переход к фазе обсуждения (1 минута)
     await start_discussion_phase()
 
 
@@ -339,7 +338,7 @@ async def start_discussion_phase():
         "🗣 **Время обсуждений!** У вас есть **1 минута**, чтобы обсудить события ночи и найти мафию.",
         parse_mode="Markdown"
     )
-    await asyncio.sleep(60)  # 1 минута обсуждения
+    await asyncio.sleep(60)
     
     if game.is_game_active:
         await start_day_voting()
@@ -364,7 +363,6 @@ async def start_day_voting():
         parse_mode="Markdown"
     )
 
-    # Таймер голосования (45 секунд)
     for _ in range(45):
         await asyncio.sleep(1)
         if not game.is_game_active:
@@ -373,7 +371,6 @@ async def start_day_voting():
         if len(game.day_votes) >= alive_count:
             break
 
-    # Убираем клавиатуру голосования
     try:
         await bot.edit_message_reply_markup(chat_id=game.chat_id, message_id=voting_msg.message_id, reply_markup=None)
     except Exception:
@@ -428,7 +425,6 @@ async def process_day_results():
     if await check_win_conditions():
         return
 
-    # Автоматический переход к ночи через 5 секунд
     await bot.send_message(game.chat_id, "🌇 Солнце садится... Следующая ночь начнется через 5 секунд.")
     await asyncio.sleep(5)
     
