@@ -1,19 +1,19 @@
 import asyncio
 import logging
 import random
+import os
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# Твой токен бота
 TOKEN = "9196956209:AAG_DRKnxxOQE_edm3KyD-k3T-Ly8exA1WE"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DB_FILE = "database.db"
 
-# Инициализация базы данных
+# Инициализация базы данных с сохранением (проверяет файл на диске)
 async def db_start():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -22,28 +22,26 @@ async def db_start():
                 username TEXT,
                 balance INTEGER DEFAULT 500,
                 jobs_done INTEGER DEFAULT 0,
-                last_work_1 INTEGER DEFAULT 0,
-                last_work_2 INTEGER DEFAULT 0,
-                last_work_3 INTEGER DEFAULT 0,
+                last_work INTEGER DEFAULT 0,
                 last_bonus INTEGER DEFAULT 0,
                 referred_by INTEGER
             )
         """)
         await db.commit()
 
-# Безопасная регистрация с очисткой ников от спецсимволов (# и др.)
+# Безопасная регистрация пользователей без сброса существующих
 async def register_user(user_id: int, username: str, full_name: str, referrer_id: int = None):
     safe_name = "".join(c for c in full_name if c.isalnum() or c in " _-").strip()
     if not safe_name:
         safe_name = "Без имени"
 
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("SELECT user_id, balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
             if not user:
                 ref = referrer_id if referrer_id and referrer_id != user_id else None
                 await db.execute(
-                    "INSERT INTO users (user_id, username, balance, jobs_done, last_work_1, last_work_2, last_work_3, last_bonus, referred_by) VALUES (?, ?, 500, 0, 0, 0, 0, 0, ?)",
+                    "INSERT INTO users (user_id, username, balance, jobs_done, last_work, last_bonus, referred_by) VALUES (?, ?, 500, 0, 0, 0, ?)",
                     (user_id, safe_name, ref)
                 )
                 if ref:
@@ -55,7 +53,7 @@ async def register_user(user_id: int, username: str, full_name: str, referrer_id
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💼 Биржа профессий", callback_data="work_menu"),
+            InlineKeyboardButton(text="💼 Защищенная работа", callback_data="work_menu"),
             InlineKeyboardButton(text="💰 Профиль", callback_data="balance")
         ],
         [
@@ -84,8 +82,7 @@ async def cmd_start(message: types.Message):
     
     text = (
         f"Здорово, **{user_display_name}**! 👋\n\n"
-        "Добро пожаловать в официальный бот проекта! 🏝\n"
-        "Здесь честная биржа труда с защитой от читеров, казино и колесо фортуны!"
+        "Добро пожаловать в официальный бот! База данных теперь сохраняется надежно, а задания защищены от ИИ."
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
@@ -110,200 +107,79 @@ async def process_balance(callback: types.CallbackQuery):
         parse_mode="Markdown"
     )
 
-# МЕНЮ БИРЖИ ПРОФЕССИЙ
+# МЕНЮ РАБОТЫ (Интерактивная капча, ИИ бессилен)
 @dp.callback_query(F.data == "work_menu")
 async def work_menu(callback: types.CallbackQuery):
-    text = (
-        "💼 **Биржа защищенных заданий**\n\n"
-        "Выбирай профессию! Задачи генерируются динамически (ИИ и копирование текста тут не помогут, нужен мозг):\n\n"
-        "1️⃣ **Шифровщик данных** (Математика/Логика | КД: 30 сек)\n"
-        "2️⃣ **Кибер-аудитор** (Поиск аномалий в коде | КД: 60 сек)\n"
-        "3️⃣ **Крипто-тререйдер** (Расчет доходности | КД: 120 сек)"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1️⃣ Шифровщик данных", callback_data="job_1")],
-        [InlineKeyboardButton(text="2️⃣ Кибер-аудитор", callback_data="job_2")],
-        [InlineKeyboardButton(text="3️⃣ Крипто-трейдер", callback_data="job_3")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
-    ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-
-# --- РАБОТА 1: Шифровщик (Мат. тренажер, ИИ бессилен) ---
-@dp.callback_query(F.data == "job_1")
-async def job_one(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     current_time = asyncio.get_event_loop().time()
-    cooldown = 30
 
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT last_work_1 FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("SELECT last_work FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             last_work = row[0] if row else 0
 
-        if current_time - last_work < cooldown:
-            left = int(cooldown - (current_time - last_work))
-            await callback.answer(f"⏳ Перерыв! Следующий шифр через {left} сек.", show_alert=True)
+        if current_time - last_work < 25:
+            left = int(25 - (current_time - last_work))
+            await callback.answer(f"⏳ Перерыв! Следующая задача через {left} сек.", show_alert=True)
             return
 
-    # Генерируем уникальный пример на лету
-    a = random.randint(12, 85)
-    b = random.randint(5, 45)
-    op = random.choice(["+", "-", "*"])
+    # Набор эмодзи для анти-ИИ капчи
+    targets = [("🐱", "кота"), ("🚗", "машину"), ("🍎", "яблоко"), ("⭐", "звезду")]
+    target_emoji, target_name = random.choice(targets)
+
+    # Создаем варианты кнопок со случайными эмодзи
+    distractors = ["🐶", "🍐", "🚀", "⚡", "🎸", "🍕", "⚽", "🌵"]
+    chosen_distractors = random.sample(distractors, 2)
     
-    if op == "+":
-        correct = a + b
-    elif op == "-":
-        correct = a - b
-    else:
-        a = random.randint(5, 15)
-        b = random.randint(3, 10)
-        correct = a * b
-
-    # Создаваем фейковые ответы для кнопок
-    wrong1 = correct + random.choice([-5, -3, 2, 4])
-    wrong2 = correct + random.choice([-10, 6, 8, -2])
-    if wrong1 == correct: wrong1 += 1
-    if wrong2 == correct: wrong2 -= 1
-
-    variants = [
-        (str(correct), "ok"),
-        (str(wrong1), "bad1"),
-        (str(wrong2), "bad2")
+    options = [
+        (target_emoji, "win"),
+        (chosen_distractors[0], "fail1"),
+        (chosen_distractors[1], "fail2")
     ]
-    random.shuffle(variants)
-
-    desc = f"🔐 **[Работа 1: Шифровщик данных]**\nРеши алгоритм доступа к шлюзу:\n\n`{a} {op} {b} = ?`"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text=variants[0][0], callback_data=f"ans_1_{variants[0][1]}"),
-            InlineKeyboardButton(text=variants[1][0], callback_data=f"ans_1_{variants[1][1]}"),
-            InlineKeyboardButton(text=variants[2][0], callback_data=f"ans_1_{variants[2][1]}")
-        ],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]
-    ])
-    await callback.message.edit_text(desc, reply_markup=kb, parse_mode="Markdown")
-
-# --- РАБОТА 2: Кибер-аудитор (Логический выбор) ---
-@dp.callback_query(F.data == "job_2")
-async def job_two(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    current_time = asyncio.get_event_loop().time()
-    cooldown = 60
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT last_work_2 FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            last_work = row[0] if row else 0
-
-        if current_time - last_work < cooldown:
-            left = int(cooldown - (current_time - last_work))
-            await callback.answer(f"⏳ Лаборатория занята! Жди {left} сек.", show_alert=True)
-            return
-
-    tasks = [
-        ("В строке кода обнаружен символ бесконечного цикла `while(True): pass`. Что это?", "Угроза зависания сервера", ["Угроза зависания сервера", "Оптимизация базы", "Красивый дизайн"]),
-        ("Пинг до дата-центра вырос с 15ms до 850ms. Причина?", "Сетевой сбои / DDoS", ["Нормальная работа", "Сетевой сбои / DDoS", "Ускорение процессора"]),
-        ("Токен бота появился в публичном репозитории GitHub. Срочное действие?", "Экстренная замена токена у BotFather", ["Ничего не делать", "Экстренная замена токена у BotFather", "Попить чай"])
-    ]
-    t = random.choice(tasks)
-    right_answer = t[1]
-    options = t[2]
     random.shuffle(options)
 
-    desc = f"🛠 **[Работа 2: Кибер-аудитор]**\nИнзудент безопасности:\n*«{t[0]}»*\n\nВыбери правильный вердикт:"
-
-    kb_buttons = []
-    for opt in options:
-        res_type = "ok" if opt == right_answer else "bad"
-        kb_buttons.append([InlineKeyboardButton(text=opt, callback_data=f"ans_2_{res_type}")])
-    kb_buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")])
-
-    await callback.message.edit_text(desc, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons), parse_mode="Markdown")
-
-# --- РАБОТА 3: Крипто-трейдер (Расчет профита) ---
-@dp.callback_query(F.data == "job_3")
-async def job_three(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    current_time = asyncio.get_event_loop().time()
-    cooldown = 120
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT last_work_3 FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            last_work = row[0] if row else 0
-
-        if current_time - last_work < cooldown:
-            left = int((cooldown - (current_time - last_work)) // 60)
-            await callback.answer(f"⏳ Аналитика рынка идет! Жди {max(1, left)} мин.", show_alert=True)
-            return
-
-    buy_price = random.randint(100, 500)
-    percent = random.choice([10, 20, 25, 50])
-    correct_profit = int(buy_price * (percent / 100))
-
-    wrong1 = correct_profit + random.choice([-15, 20])
-    wrong2 = correct_profit + random.choice([30, -25])
-    if wrong1 < 0: wrong1 = 5
-    if wrong2 < 0: wrong2 = 10
-
-    variants = [
-        (f"+{correct_profit} монет", "ok"),
-        (f"+{wrong1} монет", "bad1"),
-        (f"+{wrong2} монет", "bad2")
-    ]
-    random.shuffle(variants)
-
-    desc = f"📈 **[Работа 3: Крипто-трейдер]**\nКуплен актив за **{buy_price} коинов**. Монета выросла на **{percent}%**.\n\nКакая чистая прибыль получена?"
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=variants[0][0], callback_data=f"ans_3_{variants[0][1]}"),
-            InlineKeyboardButton(text=variants[1][0], callback_data=f"ans_3_{variants[1][1]}"),
-            InlineKeyboardButton(text=variants[2][0], callback_data=f"ans_3_{variants[2][1]}")
+            InlineKeyboardButton(text=options[0][0], callback_data=f"captcha_{options[0][1]}"),
+            InlineKeyboardButton(text=options[1][0], callback_data=f"captcha_{options[1][1]}"),
+            InlineKeyboardButton(text=options[2][0], callback_data=f"captcha_{options[2][1]}")
         ],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_menu")]
     ])
-    await callback.message.edit_text(desc, reply_markup=kb, parse_mode="Markdown")
 
-# Универсальный обработчик ответов с защитой от читов
-@dp.callback_query(F.data.startswith("ans_"))
-async def check_multi_job(callback: types.CallbackQuery):
-    data_parts = callback.data.split("_")
-    job_id = data_parts[1]
-    result_type = data_parts[2] # "ok" если верно, иначе ошибка
+    text = (
+        f"🔒 **Защищенная проверка от ИИ-читеров**\n\n"
+        f"Нажми на правильный символ на клавиатуре ниже:\n"
+        f"👉 Найди и нажми: **{target_name} ({target_emoji})**"
+    )
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
+# Обработка проверки капчи
+@dp.callback_query(F.data.startswith("captcha_"))
+async def check_captcha(callback: types.CallbackQuery):
+    result = callback.data.split("_")[1]
     user_id = callback.from_user.id
     current_time = asyncio.get_event_loop().time()
 
-    if job_id == "1":
-        earned = random.randint(70, 150)
-        db_col = "last_work_1"
-    elif job_id == "2":
-        earned = random.randint(150, 280)
-        db_col = "last_work_2"
-    else:
-        earned = random.randint(300, 550)
-        db_col = "last_work_3"
-
     async with aiosqlite.connect(DB_FILE) as db:
-        if result_type == "ok":
+        if result == "win":
+            earned = random.randint(80, 160)
             await db.execute(
-                f"UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, {db_col} = ? WHERE user_id = ?",
+                "UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, last_work = ? WHERE user_id = ?",
                 (earned, current_time, user_id)
             )
             await db.commit()
-            text = f"✅ **Верно!** Алгоритм подтвержден, начислено **+{earned} коинов**."
+            text = f"✅ **Красава!** Капча пройдена, начислено **+{earned} коинов**."
         else:
-            await db.execute(f"UPDATE users SET {db_col} = ? WHERE user_id = ?", (current_time, user_id))
+            await db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (current_time, user_id))
             await db.commit()
-            text = "❌ **Ошибка расчетов!** Неверный ответ, награда сгорела, включился кулдаун."
+            text = "❌ **Ошибка!** Выбран не тот символ. Награда сгорела, включился кулдаун."
 
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💼 На биржу", callback_data="work_menu")],
-            [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_menu")]
+            [InlineKeyboardButton(text="💼 Новая задача", callback_data="work_menu")],
+            [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
         ]),
         parse_mode="Markdown"
     )
