@@ -1,436 +1,410 @@
 import asyncio
+import logging
 import random
+import aiosqlite
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# Токен бота
-BOT_TOKEN = "8501498168:AAHvnV8lHcopmTcjtcUF3ww8yk-3F3CO7AE"
-bot = Bot(token=BOT_TOKEN)
+# Твой токен бота
+TOKEN = "9196956209:AAG_DRKnxxOQE_edm3KyD-k3T-Ly8exA1WE"
+
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
+DB_FILE = "database.db"
 
-# Хранилище игры
-class GameState:
-    def __init__(self):
-        self.is_registration = False
-        self.is_game_active = False
-        self.players = {}  # {user_id: {"name": str, "role": str, "is_alive": bool}}
-        self.chat_id = None
-        self.night_actions = {}  # {"Мафия": target_id, "Доктор": target_id, "Комиссар": target_id}
-        self.day_votes = {}  # {voter_id: target_id}
-        self.bot_username = ""
-        self.last_words_user = None  # ID игрока, ожидающего ввод предсмертного слова
-
-game = GameState()
-
-
-# Распределение ролей
-def assign_roles(players_dict):
-    user_ids = list(players_dict.keys())
-    total = len(user_ids)
-    random.shuffle(user_ids)
-
-    mafia_count = 1
-    roles_pool = ['Мафия'] * mafia_count + ['Доктор', 'Комиссар']
-    
-    while len(roles_pool) < total:
-        roles_pool.append('Мирный житель')
-
-    random.shuffle(roles_pool)
-
-    for uid, role in zip(user_ids, roles_pool):
-        players_dict[uid]['role'] = role
-        players_dict[uid]['is_alive'] = True
-
-
-# Проверка условий победы
-async def check_win_conditions():
-    alive_mafia = sum(1 for p in game.players.values() if p['is_alive'] and p['role'] == 'Мафия')
-    alive_peaceful = sum(1 for p in game.players.values() if p['is_alive'] and p['role'] != 'Мафия')
-
-    if alive_mafia == 0:
-        await bot.send_message(game.chat_id, "🎉 **Мирные жители победили!** Вся мафия уничтожена.", parse_mode="Markdown")
-        game.is_game_active = False
-        return True
-    elif alive_mafia >= alive_peaceful:
-        await bot.send_message(game.chat_id, "🦹‍♂️ **Победа Мафии!** Их стало столько же или больше, чем мирных жителей.", parse_mode="Markdown")
-        game.is_game_active = False
-        return True
-    return False
-
-
-# --- Команда /stop (Отмена игры / набора) ---
-@dp.message(Command("stop"))
-async def cmd_stop(message: types.Message):
-    game.is_registration = False
-    game.is_game_active = False
-    game.players.clear()
-    game.night_actions.clear()
-    game.day_votes.clear()
-    game.last_words_user = None
-    
-    await message.answer("🛑 **Игра успешно остановлена / набор отменен.**", parse_mode="Markdown")
-
-
-# --- Защита чата (только живые игроки могут писать во время игры) ---
-@dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def group_message_filter(message: types.Message):
-    if message.text and message.text.startswith('/'):
-        return  # Пропускаем команды
-    
-    if game.is_game_active:
-        user_id = message.from_user.id
-        if user_id not in game.players or not game.players[user_id]['is_alive']:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-
-
-# --- Обработка ЛС: Регистрация (join) и Предсмертные слова ---
-@dp.message(F.chat.type == "private", Command("start"))
-async def private_cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    text = message.text or ""
-
-    if "join" in text:
-        if not game.is_registration:
-            await message.answer("❌ Набор в игру сейчас не идет или уже завершен!")
-            return
-        
-        user_name = message.from_user.first_name
-
-        if user_id in game.players:
-            await message.answer("⚠️ Вы уже зарегистрированы в игре! Возвращайтесь в группу.")
-            return
-
-        game.players[user_id] = {"name": user_name, "role": None, "is_alive": True}
-        await message.answer("✅ **Вы успешно зарегистрированы в Мафию!**\n\nОжидайте старта игры в группе.", parse_mode="Markdown")
-        
-        if game.chat_id:
-            await bot.send_message(
-                game.chat_id, 
-                f"➕ К игре присоединился **{user_name}**! (Всего: {len(game.players)})",
-                parse_mode="Markdown"
+# Инициализация базы данных (сохраняет всё на века)
+async def db_start():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                balance INTEGER DEFAULT 500,
+                jobs_done INTEGER DEFAULT 0,
+                last_work INTEGER DEFAULT 0,
+                last_bonus INTEGER DEFAULT 0,
+                referred_by INTEGER
             )
-        return
+        """)
+        await db.commit()
 
-    await message.answer("Привет! Я бот для игры в Мафию. Добавь меня в группу и напиши там `/start` для запуска набора.")
-
-
-@dp.message(F.chat.type == "private")
-async def private_message_handler(message: types.Message):
-    user_id = message.from_user.id
-
-    # Проверка предсмертного слова
-    if game.last_words_user == user_id:
-        game.last_words_user = None
-        text = message.text
-        user_name = message.from_user.first_name
-        username = f"@{message.from_user.username}" if message.from_user.username else user_name
-        
-        if game.chat_id:
-            await bot.send_message(
-                game.chat_id,
-                f"📜 **Предсмертное слово от {username} ({user_name}):**\n«{text}»",
-                parse_mode="Markdown"
-            )
-        await message.answer("✅ Ваше предсмертное слово передано в город.")
-
-
-# --- Шаг 1: Запуск набора и старт игры в ГРУППЕ ---
-@dp.message(F.chat.type.in_({"group", "supergroup"}), Command("start"))
-async def group_cmd_start(message: types.Message):
-    # Запуск набора в группе
-    if not game.is_registration and not game.is_game_active:
-        game.is_registration = True
-        game.chat_id = message.chat.id
-        game.players.clear()
-
-        if not game.bot_username:
-            me = await bot.get_me()
-            game.bot_username = me.username
-
-        builder = InlineKeyboardBuilder()
-        builder.button(text="🎮 Присоединиться к игре", url=f"https://t.me/{game.bot_username}?start=join")
-
-        await message.answer(
-            "🎭 **Набор в игру 'Мафия' открыт!**\n\n"
-            "Чтобы участвовать, нажмите на кнопку ниже (нужно будет нажать 'Запустить' в ЛС с ботом).\n\n"
-            "📌 Как наберете игроков, напишите второй раз **/start** в этот чат для старта игры!\n"
-            "🛑 Для отмены используйте **/stop**.",
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
-        return
-
-    # Старт игры (второй /start в группе)
-    if game.is_registration:
-        if len(game.players) < 3:
-            await message.answer("⚠️ Маловато игроков! Нужно минимум 3 человека для старта.")
-            return
-
-        game.is_registration = False
-        game.is_game_active = True
-
-        assign_roles(game.players)
-
-        await message.answer("🎲 **Игра началась!** Роли распределены. Рассылаю роли в личные сообщения...")
-
-        for uid, pdata in game.players.items():
-            try:
-                await bot.send_message(
-                    uid,
-                    f"🤫 Ваша роль в игре: **{pdata['role']}**\n\nНикому не показывайте это сообщение!",
-                    parse_mode="Markdown"
+# Регистрация пользователя с учетом рефералки
+async def register_user(user_id: int, username: str, referrer_id: int = None):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            user = await cursor.fetchone()
+            if not user:
+                ref = referrer_id if referrer_id and referrer_id != user_id else None
+                await db.execute(
+                    "INSERT INTO users (user_id, username, balance, jobs_done, last_work, last_bonus, referred_by) VALUES (?, ?, 500, 0, 0, 0, ?)",
+                    (user_id, username, ref)
                 )
-            except Exception:
-                await message.answer(f"⚠️ Не смог отправить роль игроку **{pdata['name']}**. Пусть он сначала напишет боту в ЛС /start!")
+                if ref:
+                    await db.execute("UPDATE users SET balance = balance + 200 WHERE user_id = ?", (ref,))
+                    await db.execute("UPDATE users SET balance = balance + 100 WHERE user_id = ?", (user_id,))
+                await db.commit()
 
-        await start_night_phase()
-        return
+# Главное меню
+def get_main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💼 Работа (Задания)", callback_data="work_menu"),
+            InlineKeyboardButton(text="💰 Профиль", callback_data="balance")
+        ],
+        [
+            InlineKeyboardButton(text="🎰 Казино (Кости)", callback_data="casino"),
+            InlineKeyboardButton(text="🎡 Колесо Фортуны", callback_data="fortune_wheel")
+        ],
+        [
+            InlineKeyboardButton(text="🎁 Ежедневный бонус", callback_data="daily_bonus"),
+            InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals")
+        ],
+        [
+            InlineKeyboardButton(text="🏆 Топ игроков", callback_data="top")
+        ]
+    ])
 
-    if game.is_game_active:
-        await message.answer("⚠️ Игра уже идет полным ходом!")
+# Команда /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    args = message.text.split()
+    referrer_id = None
+    if len(args) > 1 and args[1].isdigit():
+        referrer_id = int(args[1])
 
+    await register_user(message.from_user.id, message.from_user.username or "Без имени", referrer_id)
+    
+    text = (
+        f"Здорово, **{message.from_user.first_name}**! 👋\n\n"
+        "Добро пожаловать в официальный бот проекта! 🏝\n"
+        "Выполняй интерактивные задания, крути колесо фортуны, забирай ежедневные бонусы и поднимайся в топ!"
+    )
+    await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
-# --- Фаза Ночи (с таймаутом 45 сек) ---
-async def start_night_phase():
-    if not game.is_game_active:
-        return
-    game.night_actions.clear()
-    await bot.send_message(
-        game.chat_id, 
-        "🌃 **Наступает ночь.** Город засыпает...\nПросыпаются мафия, комиссар и доктор. Свои ходы они делают в личных сообщениях с ботом.",
+# Профиль и баланс
+@dp.callback_query(F.data == "balance")
+async def process_balance(callback: types.CallbackQuery):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT balance, jobs_done FROM users WHERE user_id = ?", (callback.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            balance, jobs = row if row else (500, 0)
+
+    text = (
+        f"👤 **Твой профиль:**\n\n"
+        f"💰 Баланс: **{balance} коинов**\n"
+        f"🛠 Выполнено заданий: **{jobs}**"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
         parse_mode="Markdown"
     )
 
-    alive_players = {uid: p['name'] for uid, p in game.players.items() if p['is_alive']}
+# Меню работы (Интерактивные задания)
+@dp.callback_query(F.data == "work_menu")
+async def work_menu(callback: types.CallbackQuery):
+    text = (
+        "💼 **Биржа заданий и работы**\n\n"
+        "Хватит просто кликать! Теперь здесь нужно думать. Тебе будут поступать реальные задачи по проверке отзывов и контента. "
+        "За правильный ответ платим от 60 до 150 коинов. Смена доступна раз в 40 секунд!"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Взять задание в работу", callback_data="start_task")],
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
 
-    for uid, pdata in game.players.items():
-        if not pdata['is_alive']:
-            continue
+TASKS_POOL = [
+    {
+        "desc": "📄 **Задача:** Пользователь оставил отзыв на Яндекс Картах: *«Норм магаз, все быстро забрал»* со скриншотом чека.\n\n🔍 Проверь: есть ли явные признаки накрутки или мата?",
+        "right": "ok",
+        "right_btn": "✅ Одобрить (Все чисто)",
+        "wrong_btn": "❌ Отклонить (Нарушение)"
+    },
+    {
+        "desc": "📄 **Задача:** Задание на Авито: отзыв с текстом *«Ужасный продавец, трубку не берет, товар паль!»* но приложен скриншот пяти звезд.\n\n🔍 Проверь адекватность отзыва:",
+        "right": "bad",
+        "right_btn": "❌ Отклонить (Парадокс / Обман)",
+        "wrong_btn": "✅ Одобрить"
+    },
+    {
+        "desc": "📄 **Задача:** Проверка отзыва в 2GIS: *«Хорошее место, вежливый персонал, рекомендую!»* Скриншот подтверждает визит.\n\n🔍 Что делаем?",
+        "right": "ok",
+        "right_btn": "✅ Одобрить (Все четко)",
+        "wrong_btn": "❌ Отклонить"
+    }
+]
 
-        role = pdata['role']
-        if role in ['Мафия', 'Доктор', 'Комиссар']:
-            builder = InlineKeyboardBuilder()
-            for target_id, target_name in alive_players.items():
-                if role == 'Мафия':
-                    btn_text = f"🔪 Убить {target_name}"
-                elif role == 'Доктор':
-                    btn_text = f"💊 Лечить {target_name}"
-                elif role == 'Комиссар':
-                    btn_text = f"🔫 Проверить {target_name}"
+@dp.callback_query(F.data == "start_task")
+async def start_task(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    current_time = asyncio.get_event_loop().time()
 
-                builder.button(text=btn_text, callback_data=f"night:{role}:{target_id}")
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT last_work FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            last_work = row[0] if row else 0
 
-            builder.adjust(1)
-            
-            try:
-                await bot.send_message(
-                    uid,
-                    f"🌙 Ночь на дворе. Ваша роль: **{role}**.\nУ вас есть **45 секунд** на ход:",
-                    reply_markup=builder.as_markup(),
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-
-    # Ожидание ходов ночью (максимум 45 секунд)
-    for _ in range(45):
-        await asyncio.sleep(1)
-        if not game.is_game_active:
+        if current_time - last_work < 40:
+            left = int(40 - (current_time - last_work))
+            await callback.answer(f"⏳ Отдохни! Следующая смена доступна через {left} сек.", show_alert=True)
             return
-        active_roles_alive = {p['role'] for p in game.players.values() if p['is_alive'] and p['role'] in ['Мафия', 'Доктор', 'Комиссар']}
-        if set(game.night_actions.keys()) >= active_roles_alive:
-            break
+
+    task = random.choice(TASKS_POOL)
     
-    if game.is_game_active:
-        await process_night_results()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=task["right_btn"], callback_data=f"task_ans_{task['right']}_ok")],
+        [InlineKeyboardButton(text=task["wrong_btn"], callback_data=f"task_ans_{task['right']}_bad")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]
+    ])
 
+    await callback.message.edit_text(task["desc"], reply_markup=kb, parse_mode="Markdown")
 
-# --- Обработка ночных выборов в ЛС ---
-@dp.callback_query(F.data.startswith("night:"))
-async def cb_night_action(callback: types.CallbackQuery):
-    if not game.is_game_active:
-        await callback.answer("Игра не активна!", show_alert=True)
-        return
+@dp.callback_query(F.data.startswith("task_ans_"))
+async def check_task_answer(callback: types.CallbackQuery):
+    data_parts = callback.data.split("_")
+    correct_type = data_parts[2]
+    user_choice = data_parts[3]
 
-    _, role, target_id = callback.data.split(":")
-    target_id = int(target_id)
-    
-    if target_id not in game.players or not game.players[target_id]['is_alive']:
-        await callback.answer("Этот игрок уже мертв!", show_alert=True)
-        return
+    user_id = callback.from_user.id
+    current_time = asyncio.get_event_loop().time()
 
-    target_name = game.players[target_id]['name']
-    game.night_actions[role] = target_id
-
-    if role == 'Комиссар':
-        target_role = game.players[target_id]['role']
-        status = "Мафия 😈" if target_role == "Мафия" else "Мирный / Честный 😇"
-        await callback.message.edit_text(f"🔍 Вы проверили игрока **{target_name}**. Он: {status}", parse_mode="Markdown")
-    elif role == 'Мафия':
-        await callback.message.edit_text(f"🔪 Вы выбрали цель для убийства: **{target_name}**.", parse_mode="Markdown")
-    elif role == 'Доктор':
-        await callback.message.edit_text(f"💊 Вы решили лечить игрока: **{target_name}**.", parse_mode="Markdown")
-
-    await callback.answer("Ход принят!")
-
-
-# --- Итоги ночи и предсмертное слово ---
-async def process_night_results():
-    shot_target = game.night_actions.get('Мафия')
-    healed_target = game.night_actions.get('Доктор')
-
-    await bot.send_message(game.chat_id, "☀️ **Наступает утро!** Город просыпается...", parse_mode="Markdown")
-
-    killed_id = None
-    if shot_target and shot_target != healed_target:
-        game.players[shot_target]['is_alive'] = False
-        killed_id = shot_target
-        killed_name = game.players[killed_id]['name']
-        killed_role = game.players[killed_id]['role']
-
-        await bot.send_message(
-            game.chat_id, 
-            f"💀 Этим утром город не досчитался игрока **{killed_name}**.\nЕго роль была: **{killed_role}**.", 
-            parse_mode="Markdown"
-        )
-
-        # Даем убитому мафией игроку 20 секунд на предсмертное слово в ЛС
-        game.last_words_user = killed_id
-        try:
-            await bot.send_message(
-                killed_id,
-                "💀 Вы были убиты этой ночью!\nУ вас есть **20 секунд**, чтобы написать **предсмертное послание** в ответном сообщении здесь:",
-                parse_mode="Markdown"
+    if user_choice == correct_type:
+        earned = random.randint(60, 150)
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute(
+                "UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, last_work = ? WHERE user_id = ?",
+                (earned, current_time, user_id)
             )
-        except Exception:
-            pass
-
-        for _ in range(20):
-            await asyncio.sleep(1)
-            if game.last_words_user != killed_id:
-                break
-        
-        if game.last_words_user == killed_id:
-            game.last_words_user = None
+            await db.commit()
+        text = f"✅ **Верно!** Ты отлично справился с проверкой и заработал **+{earned} коинов**."
     else:
-        await bot.send_message(game.chat_id, "🛡️ Ночь прошла успешно для горожан! Никто не погиб (либо доктор вовремя вылечил раненого).", parse_mode="Markdown")
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (current_time, user_id))
+            await db.commit()
+        text = "❌ **Ошибка!** Ты пропустил брак в задании. Оплата сгорела, но кулдаун пошел."
 
-    if await check_win_conditions():
-        return
-
-    await start_discussion_phase()
-
-
-# --- Фаза Обсуждения (1 минута) ---
-async def start_discussion_phase():
-    if not game.is_game_active:
-        return
-    await bot.send_message(
-        game.chat_id,
-        "🗣 **Время обсуждений!** У вас есть **1 минута**, чтобы обсудить события ночи и найти мафию.",
-        parse_mode="Markdown"
-    )
-    await asyncio.sleep(60)
-    
-    if game.is_game_active:
-        await start_day_voting()
-
-
-# --- Фаза Дневного голосования (45 секунд) ---
-async def start_day_voting():
-    if not game.is_game_active:
-        return
-    game.day_votes.clear()
-    alive_players = {uid: p['name'] for uid, p in game.players.items() if p['is_alive']}
-
-    builder = InlineKeyboardBuilder()
-    for uid, name in alive_players.items():
-        builder.button(text=f"⚖️ Изгнать {name}", callback_data=f"vote:{uid}")
-    builder.adjust(1)
-
-    voting_msg = await bot.send_message(
-        game.chat_id,
-        "💬 **Началось голосование (Линч)!** У вас есть **45 секунд**, чтобы сделать выбор:",
-        reply_markup=builder.as_markup(),
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💼 Следующее задание", callback_data="work_menu")],
+            [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
+        ]),
         parse_mode="Markdown"
     )
 
-    for _ in range(45):
-        await asyncio.sleep(1)
-        if not game.is_game_active:
+# 🎡 Колесо Фортуны
+@dp.callback_query(F.data == "fortune_wheel")
+async def fortune_wheel_menu(callback: types.CallbackQuery):
+    text = (
+        "🎡 **Колесо Фортуны**\n\n"
+        "Стоимость прокрутки: **100 коинов**.\n"
+        "Может выпасть всё что угодно: от полного нуля до крупного джекпота!"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎰 Крутить Колесо (100 коинов)", callback_data="spin_wheel")],
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data == "spin_wheel")
+async def spin_wheel(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    cost = 100
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            balance = row[0] if row else 0
+
+        if balance < cost:
+            await callback.answer("❌ Недостаточно коинов для прокрутки!", show_alert=True)
             return
-        alive_count = sum(1 for p in game.players.values() if p['is_alive'])
-        if len(game.day_votes) >= alive_count:
-            break
 
-    try:
-        await bot.edit_message_reply_markup(chat_id=game.chat_id, message_id=voting_msg.message_id, reply_markup=None)
-    except Exception:
-        pass
+        await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (cost, user_id))
+        await db.commit()
 
-    if game.is_game_active:
-        await process_day_results()
+    await callback.message.edit_text("🎡 Колесо крутится... Затаи дыхание! 🔄")
+    await asyncio.sleep(2)
 
+    win_val = random.choices([0, 50, 100, 200, 350], weights=[35, 30, 20, 10, 5], k=1)[0]
 
-@dp.callback_query(F.data.startswith("vote:"))
-async def cb_day_vote(callback: types.CallbackQuery):
-    if not game.is_game_active:
-        await callback.answer("Игра не активна!", show_alert=True)
-        return
-
-    voter_id = callback.from_user.id
-    if voter_id not in game.players or not game.players[voter_id]['is_alive']:
-        await callback.answer("Вы мертвы или не участвуете в игре!", show_alert=True)
-        return
-
-    target_id = int(callback.data.split(":")[1])
-    game.day_votes[voter_id] = target_id
-    target_name = game.players[target_id]['name']
-
-    await callback.answer(f"Вы проголосовали против: {target_name}")
-
-
-async def process_day_results():
-    if not game.day_votes:
-        await bot.send_message(game.chat_id, "⚖️ Никто не проголосовал. Никто не изгнан.")
-    else:
-        vote_counts = {}
-        for target_id in game.day_votes.values():
-            vote_counts[target_id] = vote_counts.get(target_id, 0) + 1
-
-        max_votes = max(vote_counts.values())
-        candidates = [uid for uid, count in vote_counts.items() if count == max_votes]
-
-        if len(candidates) == 1:
-            lynched_id = candidates[0]
-            game.players[lynched_id]['is_alive'] = False
-            lynched_name = game.players[lynched_id]['name']
-            lynched_role = game.players[lynched_id]['role']
-            await bot.send_message(
-                game.chat_id,
-                f"⚖️ **Город вынес приговор!** Большинством голосов изгнан **{lynched_name}**.\nЕго роль была: **{lynched_role}**.",
-                parse_mode="Markdown"
-            )
+    async with aiosqlite.connect(DB_FILE) as db:
+        if win_val > 0:
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win_val, user_id))
+            await db.commit()
+            res_text = f"🎉 Поздравляем! На колесе выпал приз: **+{win_val} коинов**!"
         else:
-            await bot.send_message(game.chat_id, "⚖️ **Мнения жителей разошлись!** Голоса разделились поровну, сегодня никто не изгнан.")
+            res_text = "😢 Увы, выпал сектор «Банкрот». Ставка сгорела."
 
-    if await check_win_conditions():
-        return
+    await callback.message.edit_text(
+        res_text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎡 Крутить еще", callback_data="fortune_wheel")],
+            [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
 
-    await bot.send_message(game.chat_id, "🌇 Солнце садится... Следующая ночь начнется через 5 секунд.")
-    await asyncio.sleep(5)
+# 🎰 Казино (Кости)
+@dp.callback_query(F.data == "casino")
+async def casino_menu(callback: types.CallbackQuery):
+    text = (
+        "🎰 **Казино «Бикини Боттан»**\n\n"
+        "Ставка: **50 коинов**.\n"
+        "Бросаем игральную кость. Выпадет от 4 до 6 — удваиваешь ставку, меньше — проигрыш."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎲 Бросить кости (50 коинов)", callback_data="play_dice")],
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data == "play_dice")
+async def play_dice(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    bet = 50
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            balance = row[0] if row else 0
+
+        if balance < bet:
+            await callback.answer("❌ У тебя недостаточно коинов для ставки!", show_alert=True)
+            return
+
+        await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, user_id))
+        await db.commit()
+
+    await callback.message.delete()
+    dice_msg = await callback.message.answer_dice(emoji="🎲")
+    value = dice_msg.dice.value
+    await asyncio.sleep(3)
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        if value >= 4:
+            win_amount = bet * 2
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win_amount, user_id))
+            await db.commit()
+            result_text = f"🎉 Выпало **{value}**! Ты выиграл **+{win_amount} коинов**!"
+        else:
+            result_text = f"😢 Выпало **{value}**. Ставка сгорела."
+
+    await callback.message.answer(
+        result_text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎲 Еще раз", callback_data="play_dice")],
+            [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+# 🎁 Ежедневный бонус
+@dp.callback_query(F.data == "daily_bonus")
+async def daily_bonus(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    current_time = asyncio.get_event_loop().time()
+    cooldown = 86400
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT last_bonus FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            last_bonus = row[0] if row else 0
+
+        if current_time - last_bonus < cooldown:
+            left_hours = int((cooldown - (current_time - last_bonus)) // 3600)
+            await callback.answer(f"⏳ Бонус уже забирали! Жди еще примерно {left_hours} ч.", show_alert=True)
+            return
+
+        bonus_amount = 250
+        await db.execute(
+            "UPDATE users SET balance = balance + ?, last_bonus = ? WHERE user_id = ?",
+            (bonus_amount, current_time, user_id)
+        )
+        await db.commit()
+
+    await callback.message.edit_text(
+        f"🎁 Поздравляем! Ты забрал ежедневный бонус и получил **+{bonus_amount} коинов**!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+# 👥 Рефералы
+@dp.callback_query(F.data == "referrals")
+async def referrals_menu(callback: types.CallbackQuery):
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={callback.from_user.id}"
     
-    if game.is_game_active:
-        await start_night_phase()
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (callback.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            ref_count = row[0] if row else 0
 
+    text = (
+        "👥 **Реферальная система**\n\n"
+        "Приглашай друзей в бота по своей личной ссылке!\n"
+        "• Друг получает: **+100 коинов** на старте\n"
+        "• Ты получаешь: **+200 коинов** за каждого приведенного друга\n\n"
+        f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
+        f"📊 Приглашено друзей: **{ref_count}**"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+# 🏆 Топ игроков
+@dp.callback_query(F.data == "top")
+async def top_players(callback: types.CallbackQuery):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 5") as cursor:
+            rows = await cursor.fetchall()
+
+    top_text = "🏆 **Топ-5 богатеев канала:**\n\n"
+    for i, row in enumerate(rows, start=1):
+        name, bal = row
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+        top_text += f"{medal} @{name} — **{bal} коинов**\n"
+
+    await callback.message.edit_text(
+        top_text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+# Возврат в меню
+@dp.callback_query(F.data == "back_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "Главное меню:",
+        reply_markup=get_main_menu()
+    )
 
 async def main():
-    # drop_pending_updates=True сбрасывает зависшую очередь старых сообщений при запуске
-    await dp.start_polling(bot, drop_pending_updates=True)
+    await db_start()
+    logging.basicConfig(level=logging.INFO)
+    print("Бот успешно запущен и готов к работе!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
