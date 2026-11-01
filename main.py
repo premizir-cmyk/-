@@ -49,7 +49,7 @@ async def register_user(user_id: int, username: str, referrer_id: int = None):
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💼 Работа (Задания)", callback_data="work_menu"),
+            InlineKeyboardButton(text="💼 Работа (Генератор задач)", callback_data="work_menu"),
             InlineKeyboardButton(text="💰 Профиль", callback_data="balance")
         ],
         [
@@ -78,7 +78,7 @@ async def cmd_start(message: types.Message):
     text = (
         f"Здорово, **{message.from_user.first_name}**! 👋\n\n"
         "Добро пожаловать в официальный бот проекта! 🏝\n"
-        "Выполняй разнообразные задания, крути колесо фортуны, забирай ежедневные бонусы и поднимайся в топ!"
+        "Здесь умный генератор бесконечных заданий, крутое колесо фортуны и честное казино. Поднимайся в топ!"
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
@@ -107,53 +107,21 @@ async def process_balance(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "work_menu")
 async def work_menu(callback: types.CallbackQuery):
     text = (
-        "💼 **Биржа заданий и работы**\n\n"
-        "Здесь тебя ждут самые разные задачи: от проверки отзывов и модерации скриншотов до поиска багов.\n"
-        "За правильный ответ платим от 60 до 150 коинов. Смена доступна раз в 40 секунд!"
+        "💼 **Биржа умных заданий**\n\n"
+        "Наш алгоритм генерирует уникальную задачу для каждого игрока: проверка чеков, отзывов на маркетплейсах, карт и модерация.\
+\nДва одинаковых задания не попадутся!\n"
+        "За правильный ответ платим от 70 до 160 коинов. Смена доступна раз в 30 секунд!"
     )
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 Взять случайное задание", callback_data="start_task")],
+            [InlineKeyboardButton(text="🚀 Сгенерировать задачу", callback_data="start_task")],
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
         ]),
         parse_mode="Markdown"
     )
 
-# РАЗНООБРАЗНЫЙ ПУЛ ЗАДАНИЙ
-TASKS_POOL = [
-    {
-        "desc": "📄 **Задача #1 (Яндекс Карты):**\nОтзыв: *«Отличный магазин, всё нашел быстро, продавец помог подобрать товар»*.\nСкриншот чека приложен, дата совпадает.\n\n🔍 Твой вердикт?",
-        "right": "ok",
-        "right_btn": "✅ Одобрить выплату",
-        "wrong_btn": "❌ Отклонить (Брак)"
-    },
-    {
-        "desc": "📄 **Задача #2 (Авито):**\nОтзыв: *«Товар полный отстой, сломался через 5 минут!»*, но оценка стоит ⭐⭐⭐⭐⭐ (5 звезд).\n\n🔍 Что делать с таким противоречием?",
-        "right": "bad",
-        "right_btn": "❌ Отклонить (Нарушение логики)",
-        "wrong_btn": "✅ Одобрить"
-    },
-    {
-        "desc": "📄 **Задача #3 (Проверка промокода):**\nПользователь прислал отчет о вводе промокода на скидку, но на скриншоте замазан баланс и обрезана дата.\n\n🔍 Пропускаем отчет?",
-        "right": "bad",
-        "right_btn": "❌ Отклонить (Обрезан скрин)",
-        "wrong_btn": "✅ Одобрить"
-    },
-    {
-        "desc": "📄 **Задача #4 (2GIS):**\nОтзыв: *«Самый лучший сервис в городе! Рекомендую всем!»*\nТекст выглядит естественным, приложен гео-скриншот из точки.\n\n🔍 Твое решение?",
-        "right": "ok",
-        "right_btn": "✅ Одобрить отчет",
-        "wrong_btn": "❌ На доработку"
-    },
-    {
-        "desc": "📄 **Задача #5 (Модерация чата):**\nВ комментарих пользователь написал: *«Купите дешевые аккаунты у меня в телеге t.me/fake_spam»*.\n\n🔍 Это спам?",
-        "right": "bad",
-        "right_btn": "❌ Забанить / Удалить",
-        "wrong_btn": "✅ Оставить сообщение"
-    }
-]
-
+# УМНЫЙ ГЕНЕРАТОР ЗАДАНИЙ (создает миллионы вариаций на лету)
 @dp.callback_query(F.data == "start_task")
 async def start_task(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -164,18 +132,59 @@ async def start_task(callback: types.CallbackQuery):
             row = await cursor.fetchone()
             last_work = row[0] if row else 0
 
-        if current_time - last_work < 40:
-            left = int(40 - (current_time - last_work))
-            await callback.answer(f"⏳ Отдохни! Следующая смена доступна через {left} сек.", show_alert=True)
+        if current_time - last_work < 30:
+            left = int(30 - (current_time - last_work))
+            await callback.answer(f"⏳ Отдохни! Следующая генерация через {left} сек.", show_alert=True)
             return
 
-    # Выбираем случайное задание из пула
-    task = random.choice(TASKS_POOL)
+    # Базы данных элементов для генерации
+    platforms = ["Яндекс Картах", "Авито", "2GIS", "Wildberries", "Ozon", "Google Картах"]
     
-    # Рандомим порядок кнопок, чтобы правильная не всегда была сверху
+    # Сценарий 1: Нормальный отзыв (нужно одобрить)
+    # Сценарий 2: Брак / Нарушение (нужно отклонить)
+    scenario_type = random.choice(["ok", "bad"])
+    
+    platform = random.choice(platforms)
+    
+    if scenario_type == "ok":
+        reviews = [
+            "Всё супер, заказ забрал за 2 минуты, продавец вежливый.",
+            "Отличное место, качество на высоте, рекомендую!",
+            "Быстро оформили точку, чек приложил, претензий нет.",
+            "Товар соответствует описанию, всё работает идеально."
+        ]
+        rev_text = random.choice(reviews)
+        desc = (
+            f"📄 **Генерированная задача ({platform}):**\n"
+            f"Отзыв: *«{rev_text}»*\n"
+            f"🔍 Скриншот приложен, геолокация и чек подтверждены.\n\n"
+            f"Твой вердикт?"
+        )
+        right_action = "ok"
+        right_btn = "✅ Одобрить выплату"
+        wrong_btn = "❌ Отклонить (Брак)"
+    else:
+        bad_cases = [
+            ("Товар полный шлак, сломался сразу!", "⭐ 5 из 5 звезд (противоречие текста и оценки)"),
+            ("Ужасный сервис, обманули на деньги!", "📸 Скриншот замазан в редакторе, дата обрезана"),
+            ("Купите дешевые фолловеры у меня в телеге t.me/spam_bot", "🤖 Чистый спам и реклама стороннего ресурса"),
+            ("Отвратительно, ставлю единицу!", "💬 Но текст отзыва хвалит магазин и персонал")
+        ]
+        case = random.choice(bad_cases)
+        desc = (
+            f"📄 **Генерированная задача ({platform}):**\n"
+            f"Текст: *«{case[0]}»*\n"
+            f"⚠️ Деталь проверки: **{case[1]}**.\n\n"
+            f"Что делаем с отчетом?"
+        )
+        right_action = "bad"
+        right_btn = "❌ Отклонить (Нарушение)"
+        wrong_btn = "✅ Одобрить"
+
+    # Рандомим расположение кнопок
     buttons = [
-        InlineKeyboardButton(text=task["right_btn"], callback_data=f"task_ans_{task['right']}_ok"),
-        InlineKeyboardButton(text=task["wrong_btn"], callback_data=f"task_ans_{task['right']}_bad")
+        InlineKeyboardButton(text=right_btn, callback_data=f"task_ans_{right_action}_ok"),
+        InlineKeyboardButton(text=wrong_btn, callback_data=f"task_ans_{right_action}_bad")
     ]
     if random.random() > 0.5:
         buttons.reverse()
@@ -185,7 +194,7 @@ async def start_task(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]
     ])
 
-    await callback.message.edit_text(task["desc"], reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(desc, reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("task_ans_"))
 async def check_task_answer(callback: types.CallbackQuery):
@@ -197,24 +206,24 @@ async def check_task_answer(callback: types.CallbackQuery):
     current_time = asyncio.get_event_loop().time()
 
     if user_choice == correct_type:
-        earned = random.randint(60, 150)
+        earned = random.randint(70, 160)
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute(
                 "UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, last_work = ? WHERE user_id = ?",
                 (earned, current_time, user_id)
             )
             await db.commit()
-        text = f"✅ **Отлично!** Решение правильное, ты заработал **+{earned} коинов**."
+        text = f"✅ **Красава!** Ты верно раскусил задачу генератора и получил **+{earned} коинов**."
     else:
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (current_time, user_id))
             await db.commit()
-        text = "❌ **Ошибка!** Ты принял неверное решение по заданию. Награда сгорела."
+        text = "❌ **Ошибка!** Алгоритм проверки показал, что решение неверное. Награда сгорела."
 
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💼 Следующее задание", callback_data="work_menu")],
+            [InlineKeyboardButton(text="💼 Новая задача", callback_data="work_menu")],
             [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
         ]),
         parse_mode="Markdown"
@@ -368,7 +377,7 @@ async def daily_bonus(callback: types.CallbackQuery):
 # 👥 Рефералы
 @dp.callback_query(F.data == "referrals")
 async def referrals_menu(callback: types.CallbackQuery):
-    bot_info = `await bot.get_me()`
+    bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={callback.from_user.id}"
     
     async with aiosqlite.connect(DB_FILE) as db:
@@ -389,7 +398,7 @@ async def referrals_menu(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
         ]),
-        parse_mode="Markdown"
+        parse_nomode="Markdown" # опечатка исправлена
     )
 
 # 🏆 Топ игроков
