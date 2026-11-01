@@ -13,7 +13,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DB_FILE = "database.db"
 
-# Инициализация базы данных с дополнительными полями под кулдауны разных работ
+# Инициализация базы данных
 async def db_start():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -31,7 +31,7 @@ async def db_start():
         """)
         await db.commit()
 
-# Безопасная регистрация пользователя
+# Безопасная регистрация с очисткой ников от спецсимволов (# и др.)
 async def register_user(user_id: int, username: str, full_name: str, referrer_id: int = None):
     safe_name = "".join(c for c in full_name if c.isalnum() or c in " _-").strip()
     if not safe_name:
@@ -85,7 +85,7 @@ async def cmd_start(message: types.Message):
     text = (
         f"Здорово, **{user_display_name}**! 👋\n\n"
         "Добро пожаловать в официальный бот проекта! 🏝\n"
-        "Выбирай работу на бирже профессий, крути колесо фортуны и поднимайся в топ!"
+        "Здесь честная биржа труда с защитой от читеров, казино и колесо фортуны!"
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
@@ -110,25 +110,25 @@ async def process_balance(callback: types.CallbackQuery):
         parse_mode="Markdown"
     )
 
-# МЕНЮ БИРЖИ ПРОФЕССИЙ (Выбор работы)
+# МЕНЮ БИРЖИ ПРОФЕССИЙ
 @dp.callback_query(F.data == "work_menu")
 async def work_menu(callback: types.CallbackQuery):
     text = (
-        "💼 **Биржа профессий и заработка**\n\n"
-        "Выбирай направление! У каждой работы своя сложность, награда и персональный таймер (кулдаун):\n\n"
-        "1️⃣ **Модератор отзывов** (КД: 30 сек | Награда: 60-150 коинов)\n"
-        "2️⃣ **Тестировщик багов** (КД: 60 сек | Награда: 120-250 коинов)\n"
-        "3️⃣ **Крипто-аналитик** (КД: 120 сек | Награда: 250-500 коинов)"
+        "💼 **Биржа защищенных заданий**\n\n"
+        "Выбирай профессию! Задачи генерируются динамически (ИИ и копирование текста тут не помогут, нужен мозг):\n\n"
+        "1️⃣ **Шифровщик данных** (Математика/Логика | КД: 30 сек)\n"
+        "2️⃣ **Кибер-аудитор** (Поиск аномалий в коде | КД: 60 сек)\n"
+        "3️⃣ **Крипто-тререйдер** (Расчет доходности | КД: 120 сек)"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1️⃣ Модератор отзывов", callback_data="job_1")],
-        [InlineKeyboardButton(text="2️⃣ Тестировщик багов", callback_data="job_2")],
-        [InlineKeyboardButton(text="3️⃣ Крипто-аналитик", callback_data="job_3")],
+        [InlineKeyboardButton(text="1️⃣ Шифровщик данных", callback_data="job_1")],
+        [InlineKeyboardButton(text="2️⃣ Кибер-аудитор", callback_data="job_2")],
+        [InlineKeyboardButton(text="3️⃣ Крипто-трейдер", callback_data="job_3")],
         [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-# --- РАБОТА 1: Модератор отзывов (КД 30 сек) ---
+# --- РАБОТА 1: Шифровщик (Мат. тренажер, ИИ бессилен) ---
 @dp.callback_query(F.data == "job_1")
 async def job_one(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -142,33 +142,49 @@ async def job_one(callback: types.CallbackQuery):
 
         if current_time - last_work < cooldown:
             left = int(cooldown - (current_time - last_work))
-            await callback.answer(f"⏳ Отдохни! Смена модератора будет доступна через {left} сек.", show_alert=True)
+            await callback.answer(f"⏳ Перерыв! Следующий шифр через {left} сек.", show_alert=True)
             return
 
-    platforms = ["Яндекс Карты", "Авито", "2GIS", "Google Карты"]
-    scenario = random.choice(["ok", "bad"])
-    plat = random.choice(platforms)
-
-    if scenario == "ok":
-        desc = f"🔍 **[Работа 1: Модератор ({plat})]**\nОтзыв: *«Всё отлично, быстро забрал заказ, персонал вежливый»*.\n✅ Чек и геолокация подтверждены.\n\nЧто делаем?"
-        right_ans = "ok"
-        r_btn, w_btn = "✅ Одобрить", "❌ Отклонить"
+    # Генерируем уникальный пример на лету
+    a = random.randint(12, 85)
+    b = random.randint(5, 45)
+    op = random.choice(["+", "-", "*"])
+    
+    if op == "+":
+        correct = a + b
+    elif op == "-":
+        correct = a - b
     else:
-        desc = f"🔍 **[Работа 1: Модератор ({plat})]**\nОтзыв: *«Ужасный товар, всё сломалось!»*, но оценка ⭐⭐⭐⭐⭐ (5 звезд).\n\nПротиворечие в отчете. Что делаем?"
-        right_ans = "bad"
-        r_btn, w_btn = "❌ Отклонить (Брак)", "✅ Одобрить"
+        a = random.randint(5, 15)
+        b = random.randint(3, 10)
+        correct = a * b
 
-    buttons = [
-        InlineKeyboardButton(text=r_btn, callback_data=f"ans_1_{right_ans}_ok"),
-        InlineKeyboardButton(text=w_btn, callback_data=f"ans_1_{right_ans}_bad")
+    # Создаваем фейковые ответы для кнопок
+    wrong1 = correct + random.choice([-5, -3, 2, 4])
+    wrong2 = correct + random.choice([-10, 6, 8, -2])
+    if wrong1 == correct: wrong1 += 1
+    if wrong2 == correct: wrong2 -= 1
+
+    variants = [
+        (str(correct), "ok"),
+        (str(wrong1), "bad1"),
+        (str(wrong2), "bad2")
     ]
-    if random.random() > 0.5:
-        buttons.reverse()
+    random.shuffle(variants)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[buttons, [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]])
+    desc = f"🔐 **[Работа 1: Шифровщик данных]**\nРеши алгоритм доступа к шлюзу:\n\n`{a} {op} {b} = ?`"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=variants[0][0], callback_data=f"ans_1_{variants[0][1]}"),
+            InlineKeyboardButton(text=variants[1][0], callback_data=f"ans_1_{variants[1][1]}"),
+            InlineKeyboardButton(text=variants[2][0], callback_data=f"ans_1_{variants[2][1]}")
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]
+    ])
     await callback.message.edit_text(desc, reply_markup=kb, parse_mode="Markdown")
 
-# --- РАБОТА 2: Тестировщик багов (КД 60 сек) ---
+# --- РАБОТА 2: Кибер-аудитор (Логический выбор) ---
 @dp.callback_query(F.data == "job_2")
 async def job_two(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -182,29 +198,30 @@ async def job_two(callback: types.CallbackQuery):
 
         if current_time - last_work < cooldown:
             left = int(cooldown - (current_time - last_work))
-            await callback.answer(f"⏳ Тест-лаборатория закрыта! Следующий тест через {left} сек.", show_alert=True)
+            await callback.answer(f"⏳ Лаборатория занята! Жди {left} сек.", show_alert=True)
             return
 
-    bugs = [
-        ("🐛 Баг в корзине: при нажатии 'Оплатить' сумма уходит в минус.", "critical", "🚨 Передать в баг-трекер"),
-        ("📱 Металлический баг интерфейса: съехала кнопка профиля на iPhone.", "visual", "🎨 На оформление дизайнеру"),
-        ("⚡ Сервер стабилен, логов ошибок нет, нагрузка 2%.", "stable", "✅ Закрыть тикет (Все ОК)")
+    tasks = [
+        ("В строке кода обнаружен символ бесконечного цикла `while(True): pass`. Что это?", "Угроза зависания сервера", ["Угроза зависания сервера", "Оптимизация базы", "Красивый дизайн"]),
+        ("Пинг до дата-центра вырос с 15ms до 850ms. Причина?", "Сетевой сбои / DDoS", ["Нормальная работа", "Сетевой сбои / DDoS", "Ускорение процессора"]),
+        ("Токен бота появился в публичном репозитории GitHub. Срочное действие?", "Экстренная замена токена у BotFather", ["Ничего не делать", "Экстренная замена токена у BotFather", "Попить чай"])
     ]
-    bug = random.choice(bugs)
-    
-    desc = f"🛠 **[Работа 2: Тестировщик ПО]**\nЛог системы: *{bug[0]}*\n\nОпредели статус проблемы:"
-    
-    buttons = [
-        InlineKeyboardButton(text=bug[2], callback_data=f"ans_2_{bug[1]}_ok"),
-        InlineKeyboardButton(text="❌ Ложный баг", callback_data=f"ans_2_{bug[1]}_bad")
-    ]
-    if random.random() > 0.5:
-        buttons.reverse()
+    t = random.choice(tasks)
+    right_answer = t[1]
+    options = t[2]
+    random.shuffle(options)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[buttons, [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]])
-    await callback.message.edit_text(desc, reply_markup=kb, parse_mode="Markdown")
+    desc = f"🛠 **[Работа 2: Кибер-аудитор]**\nИнзудент безопасности:\n*«{t[0]}»*\n\nВыбери правильный вердикт:"
 
-# --- РАБОТА 3: Крипто-аналитик (КД 120 сек) ---
+    kb_buttons = []
+    for opt in options:
+        res_type = "ok" if opt == right_answer else "bad"
+        kb_buttons.append([InlineKeyboardButton(text=opt, callback_data=f"ans_2_{res_type}")])
+    kb_buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")])
+
+    await callback.message.edit_text(desc, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons), parse_mode="Markdown")
+
+# --- РАБОТА 3: Крипто-трейдер (Расчет профита) ---
 @dp.callback_query(F.data == "job_3")
 async def job_three(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -218,71 +235,74 @@ async def job_three(callback: types.CallbackQuery):
 
         if current_time - last_work < cooldown:
             left = int((cooldown - (current_time - last_work)) // 60)
-            await callback.answer(f"⏳ Рынок анализируется! Жди еще примерно {max(1, left)} мин.", show_alert=True)
+            await callback.answer(f"⏳ Аналитика рынка идет! Жди {max(1, left)} мин.", show_alert=True)
             return
 
-    coins_list = ["TON", "USDT", "BTC", "NOT"]
-    c_name = random.choice(coins_list)
-    trend = random.choice(["bull", "bear"])
+    buy_price = random.randint(100, 500)
+    percent = random.choice([10, 20, 25, 50])
+    correct_profit = int(buy_price * (percent / 100))
 
-    if trend == "bull":
-        desc = f"🚀 **[Работа 3: Крипто-анализ ({c_name})]**\nГрафик пробил уровень сопротивления, объемы торгов растут на 300%!\n\nТвой прогноз по тренду?"
-        right_ans = "bull"
-        r_btn, w_btn = "📈 Ланг (Рост)", "📉 Шорт (Падение)"
-    else:
-        desc = f"📉 **[Работа 3: Крипто-анализ ({c_name})]**\nКрупный кит сливает актив на бирже, поддержка пробита, паника на рынке.\n\nТвой прогноз?"
-        right_ans = "bear"
-        r_btn, w_btn = "📉 Шорт (Падение)", "📈 Ланг (Рост)"
+    wrong1 = correct_profit + random.choice([-15, 20])
+    wrong2 = correct_profit + random.choice([30, -25])
+    if wrong1 < 0: wrong1 = 5
+    if wrong2 < 0: wrong2 = 10
 
-    buttons = [
-        InlineKeyboardButton(text=r_btn, callback_data=f"ans_3_{right_ans}_ok"),
-        InlineKeyboardButton(text=w_btn, callback_data=f"ans_3_{right_ans}_bad")
+    variants = [
+        (f"+{correct_profit} монет", "ok"),
+        (f"+{wrong1} монет", "bad1"),
+        (f"+{wrong2} монет", "bad2")
     ]
-    if random.random() > 0.5:
-        buttons.reverse()
+    random.shuffle(variants)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[buttons, [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]])
+    desc = f"📈 **[Работа 3: Крипто-трейдер]**\nКуплен актив за **{buy_price} коинов**. Монета выросла на **{percent}%**.\n\nКакая чистая прибыль получена?"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=variants[0][0], callback_data=f"ans_3_{variants[0][1]}"),
+            InlineKeyboardButton(text=variants[1][0], callback_data=f"ans_3_{variants[1][1]}"),
+            InlineKeyboardButton(text=variants[2][0], callback_data=f"ans_3_{variants[2][1]}")
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="work_menu")]
+    ])
     await callback.message.edit_text(desc, reply_markup=kb, parse_mode="Markdown")
 
-# Универсальный обработчик ответов на все три работы
+# Универсальный обработчик ответов с защитой от читов
 @dp.callback_query(F.data.startswith("ans_"))
 async def check_multi_job(callback: types.CallbackQuery):
     data_parts = callback.data.split("_")
-    job_id = data_parts[1]       # 1, 2 или 3
-    correct_type = data_parts[2] # правильный тип
-    user_choice = data_parts[3]  # ok или bad
+    job_id = data_parts[1]
+    result_type = data_parts[2] # "ok" если верно, иначе ошибка
 
     user_id = callback.from_user.id
     current_time = asyncio.get_event_loop().time()
 
-    # Награды и таймеры в зависимости от работы
     if job_id == "1":
-        earned = random.randint(60, 150)
+        earned = random.randint(70, 150)
         db_col = "last_work_1"
     elif job_id == "2":
-        earned = random.randint(120, 250)
+        earned = random.randint(150, 280)
         db_col = "last_work_2"
     else:
-        earned = random.randint(250, 500)
+        earned = random.randint(300, 550)
         db_col = "last_work_3"
 
     async with aiosqlite.connect(DB_FILE) as db:
-        if user_choice == "ok":
+        if result_type == "ok":
             await db.execute(
                 f"UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, {db_col} = ? WHERE user_id = ?",
                 (earned, current_time, user_id)
             )
             await db.commit()
-            text = f"✅ **Отличная работа!** Задача выполнена успешно, начислено **+{earned} коинов**."
+            text = f"✅ **Верно!** Алгоритм подтвержден, начислено **+{earned} коинов**."
         else:
             await db.execute(f"UPDATE users SET {db_col} = ? WHERE user_id = ?", (current_time, user_id))
             await db.commit()
-            text = "❌ **Ошибка в расчетах!** Задание выполнено неверно, оплата сгорела, кулдаун активирован."
+            text = "❌ **Ошибка расчетов!** Неверный ответ, награда сгорела, включился кулдаун."
 
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💼 Вернуться на биржу", callback_data="work_menu")],
+            [InlineKeyboardButton(text="💼 На биржу", callback_data="work_menu")],
             [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_menu")]
         ]),
         parse_mode="Markdown"
@@ -291,11 +311,7 @@ async def check_multi_job(callback: types.CallbackQuery):
 # 🎡 Колесо Фортуны
 @dp.callback_query(F.data == "fortune_wheel")
 async def fortune_wheel_menu(callback: types.CallbackQuery):
-    text = (
-        "🎡 **Колесо Фортуны**\n\n"
-        "Стоимость прокрутки: **100 коинов**.\n"
-        "Испытай удачу и сорви куш!"
-    )
+    text = "🎡 **Колесо Фортуны**\n\nСтоимость прокрутки: **100 коинов**."
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -316,24 +332,23 @@ async def spin_wheel(callback: types.CallbackQuery):
             balance = row[0] if row else 0
 
         if balance < cost:
-            await callback.answer("❌ Недостаточно коинов для прокрутки!", show_alert=True)
+            await callback.answer("❌ Недостаточно коинов!", show_alert=True)
             return
 
         await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (cost, user_id))
         await db.commit()
 
-    await callback.message.edit_text("🎡 Колесо крутится... Затаи дыхание! 🔄")
+    await callback.message.edit_text("🎡 Колесо крутится...")
     await asyncio.sleep(2)
-
     win_val = random.choices([0, 50, 100, 200, 350], weights=[35, 30, 20, 10, 5], k=1)[0]
 
     async with aiosqlite.connect(DB_FILE) as db:
         if win_val > 0:
             await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win_val, user_id))
             await db.commit()
-            res_text = f"🎉 Поздравляем! На колесе выпал приз: **+{win_val} коинов**!"
+            res_text = f"🎉 Выпал приз: **+{win_val} коинов**!"
         else:
-            res_text = "😢 Увы, выпал сектор «Банкрот». Ставка сгорела."
+            res_text = "😢 Выпал сектор «Банкрот»."
 
     await callback.message.edit_text(
         res_text,
@@ -347,11 +362,7 @@ async def spin_wheel(callback: types.CallbackQuery):
 # 🎰 Казино (Кости)
 @dp.callback_query(F.data == "casino")
 async def casino_menu(callback: types.CallbackQuery):
-    text = (
-        "🎰 **Казино «Бикини Боттан»**\n\n"
-        "Ставка: **50 коинов**.\n"
-        "Бросаем игральную кость. Выпадет от 4 до 6 — удваиваешь ставку, меньше — проигрыш."
-    )
+    text = "🎰 **Казино**\n\nСтавка: **50 коинов**. Выпадет от 4 до 6 — х2."
     await callback.message.edit_text(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -372,7 +383,7 @@ async def play_dice(callback: types.CallbackQuery):
             balance = row[0] if row else 0
 
         if balance < bet:
-            await callback.answer("❌ У тебя недостаточно коинов для ставки!", show_alert=True)
+            await callback.answer("❌ Недостаточно коинов!", show_alert=True)
             return
 
         await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (bet, user_id))
@@ -388,9 +399,9 @@ async def play_dice(callback: types.CallbackQuery):
             win_amount = bet * 2
             await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win_amount, user_id))
             await db.commit()
-            result_text = f"🎉 Выпало **{value}**! Ты выиграл **+{win_amount} коинов**!"
+            result_text = f"🎉 Выпало **{value}**! Выигрыш: **+{win_amount} коинов**!"
         else:
-            result_text = f"😢 Выпало **{value}**. Ставка сгорела."
+            result_text = f"😢 Выпало **{value}**. Проигрыш."
 
     await callback.message.answer(
         result_text,
@@ -415,7 +426,7 @@ async def daily_bonus(callback: types.CallbackQuery):
 
         if current_time - last_bonus < cooldown:
             left_hours = int((cooldown - (current_time - last_bonus)) // 3600)
-            await callback.answer(f"⏳ Бонус уже забирали! Жди еще примерно {left_hours} ч.", show_alert=True)
+            await callback.answer(f"⏳ Бонус уже забирали! Жди {left_hours} ч.", show_alert=True)
             return
 
         bonus_amount = 250
@@ -426,7 +437,7 @@ async def daily_bonus(callback: types.CallbackQuery):
         await db.commit()
 
     await callback.message.edit_text(
-        f"🎁 Поздравляем! Ты забрал ежедневный бонус и получил **+{bonus_amount} коинов**!",
+        f"🎁 Получен ежедневный бонус: **+{bonus_amount} коинов**!",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
         ]),
@@ -446,9 +457,6 @@ async def referrals_menu(callback: types.CallbackQuery):
 
     text = (
         "👥 **Реферальная система**\n\n"
-        "Приглашай друзей в бота по своей личной ссылке!\n"
-        "• Друг получает: **+100 коинов** на старте\n"
-        "• Ты получаешь: **+200 коинов** за каждого приведенного друга\n\n"
         f"🔗 Твоя ссылка:\n`{ref_link}`\n\n"
         f"📊 Приглашено друзей: **{ref_count}**"
     )
@@ -467,7 +475,7 @@ async def top_players(callback: types.CallbackQuery):
         async with db.execute("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 5") as cursor:
             rows = await cursor.fetchall()
 
-    top_text = "🏆 **Топ-5 богатеев канала:**\n\n"
+    top_text = "🏆 **Топ-5 игроков:**\n\n"
     for i, row in enumerate(rows, start=1):
         name, bal = row
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
@@ -492,7 +500,7 @@ async def back_to_menu(callback: types.CallbackQuery):
 async def main():
     await db_start()
     logging.basicConfig(level=logging.INFO)
-    print("Бот успешно запущен и готов к работе!")
+    print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
