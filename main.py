@@ -13,7 +13,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-TOKEN = os.getenv("BOT_TOKEN", "8660698360:AAEGVQen4KR8MXC3bJXZqDkAijZRZdttMfs")
+# ВАЖНО: токен храни в переменной окружения BOT_TOKEN, а не в коде.
+TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН_СЮДА")
 OWNER_ID = 7605961809
 CHANNEL_ID = -1003932211788  # канал для обязательной подписки (бот должен быть админом)
 
@@ -45,7 +46,7 @@ async def db_start():
                 earned INTEGER DEFAULT 0
             )
         """)
-        # Сохранение квеста: место, здоровье, предметы, улики, чекпоинт, концовки
+        # Старая таблица квеста (один квест). Оставлена только для переноса данных.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS quest (
                 user_id INTEGER PRIMARY KEY,
@@ -59,15 +60,40 @@ async def db_start():
                 started INTEGER
             )
         """)
+        # Новая таблица: сохранение на каждый квест отдельно
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS quests (
+                user_id INTEGER,
+                qid TEXT,
+                node TEXT,
+                hp INTEGER,
+                inv TEXT,
+                flags TEXT,
+                checkpoint TEXT,
+                endings TEXT,
+                claimed TEXT,
+                started INTEGER,
+                PRIMARY KEY (user_id, qid)
+            )
+        """)
         await db.execute("CREATE TABLE IF NOT EXISTS work_cd (user_id INTEGER, job TEXT, last_ts INTEGER, PRIMARY KEY (user_id, job))")
+        for sql in (
+            "ALTER TABLE users ADD COLUMN earned INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_quest INTEGER DEFAULT 0",
+            "ALTER TABLE quest ADD COLUMN started INTEGER",
+        ):
+            try:
+                await db.execute(sql)
+            except Exception:
+                pass
+        # Перенос старых сохранений «Тайны формулы» в новую таблицу
         try:
-            await db.execute("ALTER TABLE users ADD COLUMN earned INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE quest ADD COLUMN started INTEGER")
-        except Exception:
-            pass
+            await db.execute(
+                "INSERT OR IGNORE INTO quests (user_id, qid, node, hp, inv, flags, checkpoint, endings, claimed, started) "
+                "SELECT user_id, 'formula', node, hp, inv, flags, checkpoint, endings, claimed, started FROM quest"
+            )
+        except Exception as e:
+            logging.warning("Перенос сохранений квеста: %s", e)
         await db.commit()
 
 
@@ -101,6 +127,13 @@ async def spend(user_id: int, amount: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+async def get_balance(user_id: int) -> int:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else 0
 
 
 async def show(cb: types.CallbackQuery, text: str, kb=None):
@@ -204,7 +237,7 @@ def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💼 Работа", callback_data="work_menu"),
-            InlineKeyboardButton(text="📖 Эпичный квест", callback_data="story_start"),
+            InlineKeyboardButton(text="📖 Эпичные квесты", callback_data="story_start"),
         ],
         [
             InlineKeyboardButton(text="🎰 Казино (Кости)", callback_data="casino"),
@@ -244,12 +277,14 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message):
+    bet_wait.discard(message.from_user.id)
     await message.answer("Главное меню:", reply_markup=get_main_menu())
 
 
 @dp.callback_query(F.data == "back_menu")
 async def back_menu(callback: types.CallbackQuery):
     await callback.answer()
+    bet_wait.discard(callback.from_user.id)
     await show(callback, "Главное меню:", get_main_menu())
 
 
@@ -261,12 +296,14 @@ async def process_balance(callback: types.CallbackQuery):
         async with db.execute("SELECT balance, jobs_done, earned FROM users WHERE user_id = ?", (uid,)) as cur:
             row = await cur.fetchone()
     balance, jobs, earned = row if row else (500, 0, 0)
-    q = await get_q(uid)
-    endings = len(q["endings"]) if q else 0
+    endings = 0
+    for qid in QUESTS:
+        q = await get_q(uid, qid)
+        endings += len(q["endings"]) if q else 0
     text = (
         f"👤 <b>Твой профиль:</b>\n\n💰 Баланс: <b>{balance} коинов</b>\n🛠 Смен: <b>{jobs}</b>\n"
         f"🏆 Заработано для розыгрыша: <b>{earned}</b>\n"
-        f"📖 Концовок квеста: <b>{endings}/{len(ENDINGS)}</b>"
+        f"📖 Концовок квестов: <b>{endings}/{len(ENDINGS)}</b>"
     )
     await show(callback, text, get_back_keyboard())
 
@@ -651,7 +688,7 @@ async def contest_text(uid):
     top_text = "\n".join(lines) or "Пока никто не заработал. Будь первым!"
     text = (
         "🏆 <b>Розыгрыш</b>\n\nПобеждают <b>3 игрока</b>, которые заработают больше всех. "
-        "В зачёт идут только зарплата с работ и итоговая награда квеста. Казино, колесо и бонусы не считаются.\n\n"
+        "В зачёт идут только зарплата с работ и итоговая награда квестов. Казино, колесо и бонусы не считаются.\n\n"
         f"<b>Топ-10:</b>\n{top_text}"
     )
     if uid != OWNER_ID:
@@ -700,9 +737,10 @@ async def contest_reset(message: types.Message):
 
 
 # ======================================================================
-#                      КВЕСТ: «ТАЙНА ФОРМУЛЫ»
-#   Данные квеста — это граф узлов. Чтобы добавить сцену, просто
+#                              КВЕСТЫ
+#   Данные квестов — это граф узлов. Чтобы добавить сцену, просто
 #   добавь add("id", "текст", [C("кнопка", "куда")], ...)
+#   Перед блоком сцен нужного квеста ставится CUR_Q = "id квеста".
 #
 #   Параметры узла: flags=[...] (улики/метки), give="предмет", hp=±N,
 #   cp=True (чекпоинт), end="id концовки", fail=True
@@ -711,27 +749,44 @@ async def contest_reset(message: types.Message):
 # ======================================================================
 MAX_HP = 5
 
-# Единственная награда квеста: за все 7 концовок. Зависит от времени с первого запуска квеста.
-FINAL_TIERS = [(1 * 3600, 5000), (3 * 3600, 4000), (6 * 3600, 3000), (12 * 3600, 2000), (24 * 3600, 1500)]
-FINAL_MIN = 1000
+# Награда за прохождение квеста (за все 7 его концовок):
+# до 15 минут с первого запуска — максимум, дальше -1000 за каждую начатую минуту, но не меньше минимума.
+FINAL_MAX = 15000
+FINAL_MIN = 4000
+FINAL_FREE_SEC = 15 * 60
+FINAL_STEP = 1000
+QUEST_COOLDOWN = 24 * 3600  # новый квест можно начать раз в сутки
+
+REWARD_TEXT = (
+    f"🏆 <b>Награда одна, за все 7 концовок квеста.</b> Время считается с первого запуска:\n"
+    f"до 15 мин — <b>{FINAL_MAX}</b>, дальше −{FINAL_STEP} за каждую начатую минуту, но не меньше <b>{FINAL_MIN}</b>."
+)
 
 
 def final_reward(elapsed):
-    for limit, reward in FINAL_TIERS:
-        if elapsed <= limit:
-            return reward
-    return FINAL_MIN
+    if elapsed <= FINAL_FREE_SEC:
+        return FINAL_MAX
+    minutes_over = -(-(elapsed - FINAL_FREE_SEC) // 60)  # округление вверх
+    return max(FINAL_MIN, FINAL_MAX - minutes_over * FINAL_STEP)
 
 
 ITEMS = {
+    # Тайна формулы
     "lupa": "🔎 Лупа",
     "drone": "🚁 Дрон «Белка-1»",
     "note": "🗒 Записка из мусорки",
     "blueprint": "📐 Чертёж робо-ноги",
     "napkin": "🧻 Салфетка Патрика",
+    # Похищение Губки Боба
+    "b_lupa": "🔎 Лупа Сэнди",
+    "b_flash": "🔦 Фонарик Боба",
+    "b_jar": "🥒 Банка маринада №7",
+    "b_badge": "🎖 Значок «Почётный помощник»",
+    "b_key": "🗝 Ключ от подвала",
+    "b_radio": "📻 Рация Сэнди",
 }
 
-CLUES = {
+CLUES_F = {
     "c_lock": "🔐 Царапины на замке сейфа",
     "c_fuel": "🧪 Водорослевое топливо (анализ Сэнди)",
     "c_inside": "🪟 Окно открыто ИЗНУТРИ",
@@ -750,7 +805,26 @@ CLUES = {
     "c_plankton_saw": "👀 Планктон видел розовую фигуру и красную клешню",
 }
 
-ENDINGS = {
+CLUES_B = {
+    "c_door": "🚪 Дверь снята с петель аккуратно, не выломана",
+    "c_slime": "💧 Капли рассола на дверной ручке",
+    "c_ransom": "📨 Записка с требованием выкупа",
+    "c_label": "🏷 Буквы вырезаны с этикетки «Маринад №7»",
+    "c_gary": "🐌 Гэри показал, куда ушёл похититель",
+    "c_boots": "👢 Огромный отпечаток ботинка у плиты",
+    "c_bubble_visit": "🥒 Пузырь-Бандит вчера поссорился с Бобом из-за маринадов",
+    "c_krabs_refuse": "🦀 Крабс не собирается платить выкуп",
+    "c_plankton_alibi": "🪣 У Планктона железное алиби (он сидит в бочке)",
+    "c_squid_alibi": "🎷 У Сквидварда алиби: жалобы соседей на кларнет",
+    "c_mermaid_alibi": "🦸 У героев алиби: они спали по расписанию",
+    "c_receipt": "🧾 Чек на 300 банок «Маринада №7»",
+    "c_cannery": "🏭 Следы ведут к заброшенному консервному заводу",
+    "c_radio": "📻 Перехват рации: «груз на складе»",
+    "c_cam_b": "📹 Запись камеры: здоровяк несёт мешок с Бобом",
+    "c_diary": "📓 Дневник Пузыря: «Хочу друзей»",
+}
+
+ENDINGS_F = {
     "hasty": "Поспешный арест",
     "squid": "Невинная жертва кларнета",
     "plankton": "Правосудие по Планктону",
@@ -760,16 +834,48 @@ ENDINGS = {
     "truth_justice": "Крабс за решёткой",
 }
 
+ENDINGS_B = {
+    "b_hasty": "Планктон в наручниках (зря)",
+    "b_squid": "Оскорблённый музыкант",
+    "b_heroes": "Напарник героев",
+    "b_ransom": "Деньги на ветер",
+    "b_mercy": "Прощённый Пузырь",
+    "b_justice": "Пузырь за решёткой",
+    "b_pickle": "Маринадная вечеринка",
+}
+
+CLUES_BY_Q = {"formula": CLUES_F, "bob": CLUES_B}
+ENDINGS_BY_Q = {"formula": ENDINGS_F, "bob": ENDINGS_B}
+CLUES = {**CLUES_F, **CLUES_B}
+ENDINGS = {**ENDINGS_F, **ENDINGS_B}
+
+QUESTS = {
+    "formula": {
+        "title": "Тайна формулы", "icon": "🔐", "start": "intro", "hub": "hall", "dead": "dead",
+        "desc": "Из сейфа «Красти Краб» исчезла секретная формула крабсбургера. Кто же вор?",
+    },
+    "bob": {
+        "title": "Похищение Губки Боба", "icon": "🧽", "start": "b_intro", "hub": "b_hall", "dead": "b_dead",
+        "desc": "Губка Боб пропал, а на столе лежит записка с требованием выкупа. Найди похитителя и спаси друга!",
+    },
+}
+
 NODES = {}
+CUR_Q = "formula"
 
 
 def add(nid, text, choices=(), **kw):
-    NODES[nid] = {"t": text, "c": list(choices), **kw}
+    NODES[nid] = {"t": text, "c": list(choices), "q": CUR_Q, **kw}
 
 
 def C(label, to, **kw):
     return {"l": label, "to": to, **kw}
 
+
+# ======================================================================
+#                      КВЕСТ 1: «ТАЙНА ФОРМУЛЫ»
+# ======================================================================
+CUR_Q = "formula"
 
 # ---------------------------- Пролог и главный зал ----------------------------
 add("intro",
@@ -778,7 +884,7 @@ add("intro",
     "ночью из сейфа исчезла <b>секретная формула крабсбургера</b>.\n\n"
     "Полиция разводит плавниками, поэтому Крабс нанял тебя — лучшего (и единственного свободного) детектива города.\n\n"
     "<i>Прогресс сохраняется автоматически: можно закрыть бот и вернуться в любой момент. "
-    "Всего в квесте 7 концовок. Награда одна, за все 7, и чем быстрее ты их соберёшь, тем она больше.</i>",
+    "Всего в квесте 7 концовок. Награда одна, за все 7: до 15 минут — 15000 коинов, дальше −1000 за каждую минуту (но не меньше 4000).</i>",
     [C("🚪 Приступить к расследованию", "hall")])
 
 add("hall",
@@ -1145,57 +1251,536 @@ add("dead",
     fail=True)
 
 
-# ---------------------------- Движок квеста ----------------------------
-def new_q():
-    return {"node": "intro", "hp": MAX_HP, "inv": [], "flags": [], "cp": "hall", "endings": [], "claimed": [], "started": int(time.time())}
+# ======================================================================
+#                 КВЕСТ 2: «ПОХИЩЕНИЕ ГУБКИ БОБА»
+# ======================================================================
+CUR_Q = "bob"
+
+# ---------------------------- Пролог и ананас ----------------------------
+add("b_intro",
+    "🍍 <b>Пролог. Похищение Губки Боба</b>\n\n"
+    "Раннее утро в Бикини Боттом. Ты ещё не допил водорослевый кофе, как в дверь врывается Патрик:\n"
+    "— Губка Боб пропал! Дома никого, на столе записка, а Гэри смотрит на меня как на преступника!\n\n"
+    "Без Боба «Красти Краб» не открылся, а значит, нет крабсбургеров. Город в панике. Дело придётся раскрыть тебе.\n\n"
+    "<i>Прогресс сохраняется автоматически. Всего в квесте 7 концовок. Награда одна, за все 7: "
+    "до 15 минут — 15000 коинов, дальше −1000 за каждую минуту (но не меньше 4000).</i>",
+    [C("🍍 Бежать к ананасу", "b_hall")])
+
+add("b_hall",
+    "🍍 <b>Ананас на дне океана</b>\n\nДом Губки Боба выглядит так, будто хозяин вышел на минуточку. "
+    "Гэри жалобно мяукает у порога. Откуда начнём?",
+    [
+        C("🚪 Осмотреть входную дверь", "b_door"),
+        C("🛋 Войти в дом", "b_inside"),
+        C("🐌 Поговорить с Гэри", "b_gary"),
+        C("🗺 Карта Бикини Боттом", "b_map"),
+        C("📋 Назвать похитителя (нужно 4 улики)", "b_theory", clues=4),
+    ], cp=True)
+
+add("b_door",
+    "🚪 Входная дверь не выломана. Её <b>аккуратно сняли с петель</b>, а потом поставили обратно. "
+    "Профессионал? Или очень вежливый гость?",
+    [C("🔎 Присмотреться к ручке", "b_handle", item="b_lupa", hint="Нужна лупа (у Сэнди)"), C("◀️ Назад", "b_hall")],
+    flags=["c_door"])
+
+add("b_handle",
+    "Под лупой на ручке видны блестящие капельки. Пахнет укропом и уксусом. Это <b>рассол</b>.",
+    [C("◀️ Назад", "b_door")], flags=["c_slime"])
+
+# ---------------------------- Внутри дома ----------------------------
+add("b_inside",
+    "🛋 <b>Гостиная</b>\n\nНа столике — записка, из кухни тянет холодной котлетой, а дверь спальни приоткрыта.",
+    [
+        C("📨 Прочитать записку", "b_ransom"),
+        C("🍳 Пройти на кухню", "b_kitchen_b"),
+        C("🛏 Заглянуть в спальню", "b_bedroom"),
+        C("◀️ На улицу", "b_hall"),
+    ])
+
+add("b_ransom",
+    "Записка из вырезанных букв:\n<i>«МИЛЛИОН КОИНОВ ИЛИ БОБ БОЛЬШЕ НЕ СПЕЧЁТ НИ ОДНОГО БУРГЕРА. ПОЛНОЧЬ. — ДОБРЫЙ ДРУГ»</i>\n\n"
+    "Буквы вырезаны из какой-то упаковки.",
+    [C("🔎 Изучить обратную сторону лупой", "b_label", item="b_lupa", hint="Нужна лупа (у Сэнди)"), C("◀️ Назад", "b_inside")],
+    flags=["c_ransom"])
+
+add("b_label",
+    "На обороте букв — обрывки этикетки с нарисованным огурцом и клеймом <b>«Маринад №7»</b>. "
+    "Такие банки продают не везде.",
+    [C("◀️ Назад", "b_inside")], flags=["c_label"])
+
+add("b_kitchen_b",
+    "🍳 <b>Кухня Боба</b>\n\nНа плите стоит недоеденный ужин, холодильник немного приоткрыт.",
+    [
+        C("🔥 Осмотреть плиту", "b_stove"),
+        C("🧊 Заглянуть в холодильник", "b_fridge_b"),
+        C("◀️ В гостиную", "b_inside"),
+    ])
+
+add("b_stove",
+    "Плита ещё тёплая: Боб что-то готовил, когда его прервали. Рядом на полу — <b>огромный отпечаток ботинка</b>, "
+    "в два раза больше, чем у любого жителя города.",
+    [C("◀️ Назад", "b_kitchen_b")], flags=["c_boots"])
+
+add("b_fridge_b",
+    "Дверца холодильника захлопывается на твоём плавнике! Зато внутри стоит открытая банка маринада №7, "
+    "с которой капает рассол. Вещдок.",
+    [C("◀️ Назад", "b_kitchen_b")], hp=-1, give="b_jar")
+
+add("b_bedroom",
+    "🛏 <b>Спальня Боба</b>\n\nИдеально заправленная кровать, одинаковые брюки в шкафу и ни одного следа борьбы.",
+    [
+        C("🔦 Заглянуть под кровать", "b_bed_under"),
+        C("👖 Проверить шкаф", "b_wardrobe"),
+        C("◀️ В гостиную", "b_inside"),
+    ])
+
+add("b_bed_under",
+    "Под кроватью — пыльный носок, спящий бабочкоскат и... рабочий фонарик. Пригодится в тёмных местах.",
+    [C("◀️ Назад", "b_bedroom")], give="b_flash")
+
+add("b_wardrobe",
+    "В кармане брюк лежит список заказов Боба. Вчерашний заказ №17 обведён: «БЕЗ маринадов! (тот самый гость)».",
+    [C("◀️ Назад", "b_bedroom")])
+
+# ---------------------------- Гэри ----------------------------
+add("b_gary",
+    "🐌 <b>Гэри</b>\n\nУлитка смотрит на тебя огромными глазами. Явно хочет что-то сказать.",
+    [
+        C("🧠 Позвать Патрика переводить", "b_patrick_translate"),
+        C("🍽 Накормить Гэри", "b_gary_feed"),
+        C("◀️ Назад", "b_hall"),
+    ])
+
+add("b_patrick_translate",
+    "Патрик серьёзно кивает: «Он говорит... э-э... мяу». Гэри закатывает глаза. Переводчик из Патрика так себе.",
+    [C("◀️ Назад", "b_gary")])
+
+add("b_gary_feed",
+    "Гэри мигом съедает корм и тянет тебя за собой к заднему двору. Там — всё те же <b>огромные следы</b> "
+    "и сильный запах маринада. Они ведут на окраину города.",
+    [C("◀️ Назад", "b_gary")], flags=["c_gary"], hp=1)
+
+# ---------------------------- Карта города ----------------------------
+add("b_map",
+    "🗺 <b>Бикини Боттом</b>\n\nМного мест, много подозреваемых. Куда направимся?",
+    [
+        C("🍔 Красти Краб", "b_krusty"),
+        C("🌳 Купол Сэнди", "b_sandy"),
+        C("🧪 Чам Баккет", "b_chum"),
+        C("🎷 Дом Сквидварда", "b_squid"),
+        C("🦸 Дом героев", "b_heroes"),
+        C("🚦 Перекрёсток", "b_street"),
+        C("🛒 Магазин «Маринадный рай»", "b_store", all=["c_label"], hide=True),
+        C("🏭 Консервный завод", "b_factory", all=["c_cannery"], hide=True),
+        C("◀️ К ананасу", "b_hall"),
+    ])
+
+# ---------------------------- Красти Краб ----------------------------
+add("b_krusty",
+    "🍔 <b>Красти Краб</b>\n\nВ зале пусто, посетители ропщут. Мистер Крабс подсчитывает убытки.",
+    [
+        C("🦀 Поговорить с Крабсом", "b_krabs_talk"),
+        C("📒 Заглянуть в журнал заказов", "b_kk_kitchen"),
+        C("◀️ На карту", "b_map"),
+    ])
+
+add("b_krabs_talk",
+    "🦀 <b>Мистер Крабс</b>\n\n— Боб пропал?! А кто будет жарить котлеты?! Кто будет работать за копейки?!",
+    [
+        C("💰 Спросить про выкуп", "b_krabs_ransom"),
+        C("📅 Спросить про график Боба", "b_krabs_schedule"),
+        C("◀️ Назад", "b_krusty"),
+    ])
+
+add("b_krabs_ransom",
+    "— Миллион?! Ни за что! — Крабс хватается за сердце. — Выкуп — это выдумка мошенников! Ни одной монеты!",
+    [
+        C("📹 Показать запись камеры и уговорить", "b_krabs_persuade", all=["c_krabs_refuse", "c_cam_b"],
+          hint="Нужна запись камеры с перекрёстка"),
+        C("◀️ Назад", "b_krabs_talk"),
+    ], flags=["c_krabs_refuse"])
+
+add("b_krabs_persuade",
+    "Крабс смотрит, как здоровяк тащит мешок с Бобом, и бледнеет. «Ладно... Но только монеты прошлого года!» "
+    "Он трясущимися клешнями собирает чемодан.",
+    [C("🧳 Взять чемодан", "b_ransom_bag"), C("◀️ Передумать", "b_krusty")])
+
+add("b_ransom_bag",
+    "Чемодан набит. До полуночи ещё есть время. Можно отнести выкуп, как требует записка, а можно продолжить расследование.",
+    [C("🧳 Отнести выкуп в полночь", "b_end_ransom"), C("◀️ Продолжить расследование", "b_krusty")])
+
+add("b_krabs_schedule",
+    "— Боб вчера отпросился пораньше, сказал, что встречается с каким-то особенным гостем. "
+    "Я, конечно, вычел это из зарплаты.",
+    [C("◀️ Назад", "b_krabs_talk")])
+
+add("b_kk_kitchen",
+    "В журнале заказов жирным шрифтом: последний гость вчера — <b>Пузырь-Бандит</b>. "
+    "Он орал, что в его бургере нашли маринады, а Боб клялся, что это не так. Скандал.",
+    [C("◀️ Назад", "b_krusty")], flags=["c_bubble_visit"])
+
+# ---------------------------- Сэнди ----------------------------
+add("b_sandy",
+    "🌳 <b>Купол Сэнди</b>\n\nБелка колдует над чем-то громоздким.\n— Боб пропал? Партнёр, держи лупу: с ней увидишь то, "
+    "что не видно глазу.",
+    [
+        C("📻 Расспросить про рацию", "b_sandy_radio"),
+        C("📡 Настроить рацию на сигнал", "b_radio_scan", item="b_radio", hint="Сначала возьми рацию у Сэнди"),
+        C("◀️ На карту", "b_map"),
+    ], give="b_lupa")
+
+add("b_sandy_radio",
+    "Сэнди протягивает потёртую рацию.\n— Ловит все частоты в городе. Только настроишь сам: там нужна математика.",
+    [C("◀️ Назад", "b_sandy")], give="b_radio")
+
+add("b_radio_scan",
+    "Рация шипит. Экран просит ввести частоту:\n\n<b>7 × 6 − 6 = ?</b>",
+    [C("36", "b_radio_ok"), C("48", "b_radio_wrong"), C("42", "b_radio_wrong")])
+
+add("b_radio_wrong",
+    "Рация взвизгивает на всю округу, и у тебя звенит в ушах. Попробуй ещё раз.",
+    [C("🔁 Ещё раз", "b_radio_scan")], hp=-1)
+
+add("b_radio_ok",
+    "Сквозь треск слышен грубый голос: «...груз доставлен на склад. Маринад не забыть. Босс будет доволен...» "
+    "Сигнал идёт с окраины города.",
+    [C("◀️ Назад", "b_sandy")], flags=["c_radio"])
+
+# ---------------------------- Чам Баккет ----------------------------
+add("b_chum",
+    "🧪 <b>Чам Баккет</b>\n\nИз бочки у входа торчит маленький глаз. Это Планктон.\n"
+    "— Я тут застрял! Меня Карен в бочку запихнула за плохое поведение! Но на похищение я бы и сам согласился!",
+    [
+        C("🪣 Помочь Планктону вылезти", "b_plankton_free"),
+        C("📹 Спросить у Карен записи камер", "b_karen"),
+        C("◀️ На карту", "b_map"),
+    ])
+
+add("b_plankton_free",
+    "Планктон вылезает и от радости делится с тобой печеньем. Крошка в мозгу, но силы возвращаются.",
+    [C("◀️ Назад", "b_chum")], hp=1)
+
+add("b_karen",
+    "Карен показывает запись: Планктон сидит в бочке с 20:00 до самого утра и ругается на весь свет. "
+    "Алиби железное.",
+    [C("◀️ Назад", "b_chum")], flags=["c_plankton_alibi"])
+
+# ---------------------------- Сквидвард ----------------------------
+add("b_squid",
+    "🎷 <b>Дом Сквидварда</b>\n\n— Если вы пришли сказать, что Боба нашли, не говорите. Мне и так хорошо, — бурчит Сквидвард.",
+    [
+        C("🎷 Спросить про вечер", "b_squid_alibi"),
+        C("😤 Обыскать дом", "b_squid_search"),
+        C("◀️ На карту", "b_map"),
+    ])
+
+add("b_squid_alibi",
+    "— Я играл на кларнете до полуночи! — Он явно гордится. — Миссис Пафф стучала мне в стену двенадцать раз. "
+    "Спросите кого угодно.",
+    [C("◀️ Назад", "b_squid")], flags=["c_squid_alibi"])
+
+add("b_squid_search",
+    "Сквидвард бьёт тебя кларнетом по голове. В его доме нет ничего, кроме скуки и сорока нот «Ля».",
+    [C("◀️ Назад", "b_squid")], hp=-1)
+
+# ---------------------------- Дом героев ----------------------------
+add("b_heroes",
+    "🦸 <b>Дом героев</b>\n\nМужчина-Русалка и Мальчик-Ракушка пьют чай с печеньем. Увидев тебя, вскакивают: «ЗЛОДЕИ ГДЕ?!»",
+    [
+        C("🦸 Поговорить с героями", "b_heroes_talk"),
+        C("🎖 Осмотреть коллекцию значков", "b_badges"),
+        C("◀️ На карту", "b_map"),
+    ])
+
+add("b_heroes_talk",
+    "— Мы были на дежурстве! — гордо заявляет Мужчина-Русалка. — Ровно в 21:00 мы уснули по расписанию. "
+    "Мальчик-Ракушка подтвердит! — Мальчик-Ракушка храпит рядом.",
+    [C("◀️ Назад", "b_heroes")], flags=["c_mermaid_alibi"])
+
+add("b_badges",
+    "На стене висят значки за подвиги. Один блестит особенно ярко: «Почётный помощник» с выгравированным именем Боба. "
+    "Мужчина-Русалка машет рукой: «Бери, у нас таких ещё сто».",
+    [C("◀️ Назад", "b_heroes")], give="b_badge")
+
+# ---------------------------- Перекрёсток ----------------------------
+add("b_street",
+    "🚦 <b>Перекрёсток</b>\n\nСветофор мигает, рядом на столбе висит камера наблюдения, а на асфальте — странные следы.",
+    [
+        C("📹 Подключиться к камере", "b_cam_code", item="b_radio", hint="Нужна рация (спроси Сэнди)"),
+        C("👣 Изучить следы на асфальте", "b_street_tracks"),
+        C("◀️ На карту", "b_map"),
+    ])
+
+add("b_street_tracks",
+    "Огромные ботинки оставляют глубокие следы. Рядом блестят капли рассола. Они тянутся на окраину, к "
+    "<b>заброшенному консервному заводу</b>.",
+    [C("◀️ Назад", "b_street")], flags=["c_cannery"])
+
+add("b_cam_code",
+    "Рация подключилась к панели камеры. Экран просит код:\n\n<b>3² + 4² = ?</b>",
+    [C("14", "b_cam_wrong"), C("25", "b_cam_ok"), C("49", "b_cam_wrong")])
+
+add("b_cam_wrong",
+    "Бззз! Рация бьёт током. Придётся попробовать ещё раз.",
+    [C("🔁 Ещё раз", "b_cam_code")], hp=-1)
+
+add("b_cam_ok",
+    "Запись вчерашнего вечера: здоровяк в жилете с огурцом на спине тащит большой мешок. Мешок кричит голосом Боба: "
+    "«Я готов! Я всегда готов!» Лица не видно.",
+    [C("◀️ Назад", "b_street")], flags=["c_cam_b"])
+
+# ---------------------------- Магазин ----------------------------
+add("b_store",
+    "🛒 <b>Маринадный рай</b>\n\nПродавец вертит банку «Маринад №7».\n"
+    "— Такие вчера купил один заказчик. Триста банок! Попросил доставить на старый консервный завод. Платил наличными, "
+    "в жилете с огурцом.",
+    [C("◀️ На карту", "b_map")], flags=["c_receipt", "c_cannery"])
+
+# ---------------------------- Консервный завод ----------------------------
+add("b_factory",
+    "🏭 <b>Заброшенный консервный завод</b>\n\nРжавые трубы, выбитые окна, вонь укропа. На вывеске едва читается «Маринад №7». "
+    "Внутри слышен чей-то голос.",
+    [
+        C("🚪 Постучать в дверь", "b_knock"),
+        C("🔦 Обойти завод с тыла", "b_back_fac", item="b_flash", hint="Нужен фонарик (спальня Боба)"),
+        C("◀️ На карту", "b_map"),
+    ], cp=True)
+
+add("b_knock",
+    "Через щель доносится грубый голос: «Пароль?»",
+    [
+        C("«Огурец!»", "b_pass_wrong"),
+        C("«Маринад №7»", "b_fin", all=["c_label"], hint="Где-то ты видел это название..."),
+        C("«Крабсбургер!»", "b_pass_wrong"),
+    ])
+
+add("b_pass_wrong",
+    "Голос хохочет, и тебе на голову опрокидывается ведро рассола. Фу!",
+    [C("🤧 Отряхнуться", "b_factory")], hp=-1)
+
+add("b_back_fac",
+    "Фонарик освещает ржавую стену и узкое окошко.",
+    [C("🪟 Протиснуться в окошко", "b_squeeze"), C("◀️ Назад", "b_factory")])
+
+add("b_squeeze",
+    "Ты застреваешь на секунду, потом вываливаешься внутрь. Ай!",
+    [C("🏭 Осмотреться", "b_fin")], hp=-1)
+
+add("b_fin",
+    "🏭 <b>Внутри завода</b>\n\nРяды банок до потолка. В глубине — стол с бумагами и тяжёлая металлическая дверь подвала.",
+    [
+        C("📓 Осмотреть стол", "b_desk_f"),
+        C("🫙 Обшарить стеллажи", "b_shelves"),
+        C("🔒 Открыть подвал", "b_basement", item="b_key", hint="Ключ спрятан где-то на заводе"),
+        C("◀️ Выйти", "b_factory"),
+    ], cp=True)
+
+add("b_desk_f",
+    "На столе лежит потрёпанный дневник. Последняя запись: «Сегодня на мой день рождения опять никто не пришёл. "
+    "Хочу друзей. И чтобы Боб сделал бургер с маринадом, как раньше».",
+    [C("◀️ Назад", "b_fin")], flags=["c_diary"])
+
+add("b_shelves",
+    "Три банки стоят особняком. Какую откроем?",
+    [C("🥒 Банка с огурцами", "b_jar_wrong"), C("🫙 Банка «Секретный ингредиент»", "b_jar_key"), C("🍅 Банка с томатами", "b_jar_wrong")])
+
+add("b_jar_wrong",
+    "Внутри просто рассол. Ты облизываешь плавник. Кисло.",
+    [C("◀️ К стеллажам", "b_shelves")])
+
+add("b_jar_key",
+    "Под крышкой лежит ржавый ключ с биркой «ПОДВАЛ».",
+    [C("◀️ Назад", "b_fin")], give="b_key")
+
+# ---------------------------- Подвал и признание ----------------------------
+add("b_basement",
+    "🔒 <b>Подвал</b>\n\nНа стуле сидит Губка Боб с мягкими верёвками на ногах и радостно машет тебе.\n"
+    "— Я знал, что ты придёшь! Но он очень милый, только вот...\n"
+    "В углу мнётся огромный здоровяк в жилете с огурцом — <b>Пузырь-Бандит</b>.",
+    [
+        C("🕵️ Предъявить обвинение", "b_confront"),
+        C("🥒 Предложить Пузырю дружбу", "b_friend", item="b_jar", all=["c_diary"],
+          hint="Нужны дневник Пузыря и банка маринада"),
+    ], cp=True)
+
+add("b_confront",
+    "Пузырь-Бандит опускает голову:\n— Да, это я. Я только хотел, чтобы кто-нибудь пришёл на мой день рождения! "
+    "Боба похитил, чтобы он сделал мне идеальный бургер. А выкуп придумал, чтобы звучало серьёзно...",
+    [C("🤝 Простить Пузыря", "b_end_mercy"), C("🚔 Сдать в полицию", "b_end_justice")])
+
+add("b_friend",
+    "Ты ставишь на стол банку маринада №7 и протягиваешь Пузырю лапу. Он вытирает слезу: «Правда? Я приглашён?» "
+    "Боб уже зажигает свечки на торте.",
+    [C("🎂 Начать праздник", "b_end_pickle")])
+
+# ---------------------------- Развязка ----------------------------
+add("b_theory",
+    "📋 <b>Развязка</b>\n\nВсе собрались у ананаса. Патрик жуёт жвачку, Гэри нервно мяукает. Кого ты назовёшь похитителем?",
+    [
+        C("🦑 Сквидварда", "b_acc_squid"),
+        C("🧪 Планктона", "b_acc_plankton"),
+        C("🦸 Мужчину-Русалку", "b_acc_heroes", item="b_badge", hint="Нужен значок «Почётный помощник»"),
+        C("🥒 Пузыря-Бандита", "b_acc_bubble", all=["c_label", "c_boots", "c_cannery"],
+          hint="Нужны улики: этикетка маринада, следы ботинок и завод"),
+        C("🔎 Ещё поищу улики", "b_hall"),
+    ], cp=True)
+
+add("b_acc_squid",
+    "Сквидвард даже не вынимает кларнет изо рта: «Да, конечно, это я. В свободное время я ворую губок».",
+    [C("😠 Настаивать", "b_end_squid"), C("🙇 Извиниться и передумать", "b_squid_sorry")])
+
+add("b_squid_sorry",
+    "Сквидвард метко запускает тебе кларнетом в лоб. Ты потираешь шишку и возвращаешься к версиям.",
+    [C("◀️ К версиям", "b_theory")], hp=-1)
+
+add("b_acc_plankton",
+    "Планктон вылезает из бочки и вопит: «Опять я?! Да у меня алиби! Я сижу в бочке!»",
+    [
+        C("⛓ Настаивать и арестовать", "b_end_hasty"),
+        C("◀️ Передумать", "b_theory"),
+    ])
+
+add("b_acc_heroes",
+    "Мужчина-Русалка вскидывает бровь: «Мы?! Мы же защитники!» Мальчик-Ракушка шепчет: «Они нашли значок».",
+    [C("🎖 Показать значок", "b_end_heroes"), C("◀️ Передумать", "b_theory")])
+
+add("b_acc_bubble",
+    "Толпа расступается. Пузырь-Бандит краснеет: «Я? Да вы что! Я просто мимо проходил!»",
+    [C("🏷 Показать этикетку и следы ботинок", "b_bubble_break1")])
+
+add("b_bubble_break1",
+    "Ты прикладываешь вырезанные буквы к банке маринада и ставишь рядом огромный ботинок Пузыря. Всё сходится. "
+    "Лицо Пузыря покрывается испариной.",
+    [C("📹 Напомнить про завод", "b_bubble_break2")])
+
+add("b_bubble_break2",
+    "— Ладно, ладно! — Пузырь вскидывает руки. — Боб на старом заводе! Только не бейте!",
+    [C("🏃 Бежать на завод", "b_chase")])
+
+add("b_chase",
+    "Вы всей толпой несётесь к заводу. Пузырь бежит впереди, показывает дорогу и приводит прямо к подвалу.",
+    [C("🔓 Открыть подвал", "b_basement")], hp=-1)
+
+# ---------------------------- Концовки ----------------------------
+add("b_end_hasty",
+    "🚔 Планктона увозят в участок. Назавтра его выпускают: у него алиби в виде бочки. А Боб так и не найден. "
+    "Карен вздыхает: «Я же говорила».",
+    end="b_hasty")
+
+add("b_end_squid",
+    "⚖️ Сквидвард подал на тебя в суд за клевету, и ты проиграл. Лицензия детектива отозвана. "
+    "Зато в городе стало тише: Сквидвард больше не играет по утрам. Из вредности.",
+    end="b_squid")
+
+add("b_end_heroes",
+    "🦸 Мужчина-Русалка радостно хлопает тебя по плечу: «Ты выдержал испытание! Теперь ты наш напарник!» "
+    "Три дня подряд ты спасаешь город от воображаемых злодеев. Боба же найдут сами, спустя неделю. Он просто потерялся на сборе устриц.",
+    end="b_heroes")
+
+add("b_end_ransom",
+    "🧳 В полночь чемодан забирает таинственная тень. Наутро Боб возвращается с мешком на голове и рассказывает, "
+    "что похититель — «очень приятный человек с огурцом». Крабс неделю не разговаривает с тобой из-за потраченных денег.",
+    end="b_ransom")
+
+add("b_end_mercy",
+    "🕊 Ты уговариваешь не сажать Пузыря. Боб жарит ему бургер с маринадом, весь город приходит на запоздалый день рождения, "
+    "а Пузырь обещает больше никого не похищать. Настоящая концовка!",
+    end="b_mercy")
+
+add("b_end_justice",
+    "🚔 Пузыря-Бандита уводят в участок. Боб возвращается в «Красти Краб», а Крабс снова вычитает опоздание из его зарплаты. "
+    "Справедливость торжествует. Настоящая концовка!",
+    end="b_justice")
+
+add("b_end_pickle",
+    "🎂 Пузырь впервые в жизни задувает свечи в окружении друзей. Боб жарит бургеры с маринадом №7, Патрик танцует с Гэри, "
+    "Сэнди включает фейерверк. Секретная концовка!",
+    end="b_pickle")
+
+add("b_dead",
+    "💀 <b>Силы кончились</b>\n\nТы вымотан до предела. Придётся перевести дух и вернуться к последнему чекпоинту. "
+    "Здоровье восстановится.",
+    fail=True)
 
 
-async def get_q(uid):
+# ---------------------------- Движок квестов ----------------------------
+def new_q(qid):
+    return {"node": QUESTS[qid]["start"], "hp": MAX_HP, "inv": [], "flags": [], "cp": QUESTS[qid]["hub"],
+            "endings": [], "claimed": [], "started": int(time.time())}
+
+
+async def get_q(uid, qid):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
-            "SELECT node, hp, inv, flags, checkpoint, endings, claimed, started FROM quest WHERE user_id = ?", (uid,)
+            "SELECT node, hp, inv, flags, checkpoint, endings, claimed, started FROM quests WHERE user_id = ? AND qid = ?",
+            (uid, qid),
         ) as cur:
             r = await cur.fetchone()
     if not r:
         return None
     return {
         "node": r[0], "hp": r[1], "inv": json.loads(r[2] or "[]"), "flags": json.loads(r[3] or "[]"),
-        "cp": r[4] or "hall", "endings": json.loads(r[5] or "[]"), "claimed": json.loads(r[6] or "[]"),
+        "cp": r[4] or QUESTS[qid]["hub"], "endings": json.loads(r[5] or "[]"), "claimed": json.loads(r[6] or "[]"),
         "started": int(r[7] or time.time()),
     }
 
 
-async def save_q(uid, q):
+async def save_q(uid, qid, q):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO quest (user_id, node, hp, inv, flags, checkpoint, endings, claimed, started) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (uid, q["node"], q["hp"], json.dumps(q["inv"]), json.dumps(q["flags"]), q["cp"],
+            "INSERT OR REPLACE INTO quests (user_id, qid, node, hp, inv, flags, checkpoint, endings, claimed, started) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, qid, q["node"], q["hp"], json.dumps(q["inv"]), json.dumps(q["flags"]), q["cp"],
              json.dumps(q["endings"]), json.dumps(q["claimed"]), q["started"]),
         )
         await db.commit()
 
 
-def clue_count(flags):
-    return sum(1 for f in flags if f in CLUES)
+async def quest_gate(uid):
+    """Лимит: новый квест можно начать раз в сутки. Возвращает текст ошибки или None."""
+    if uid == OWNER_ID:
+        return None
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT last_quest FROM users WHERE user_id = ?", (uid,)) as cur:
+            row = await cur.fetchone()
+    last = (row[0] if row else 0) or 0
+    left = QUEST_COOLDOWN - (int(time.time()) - last)
+    if left > 0:
+        return f"Новый квест можно начать раз в сутки. Осталось ждать: {fmt_time(left)}"
+    return None
+
+
+async def mark_quest_start(uid):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET last_quest = ? WHERE user_id = ?", (int(time.time()), uid))
+        await db.commit()
+
+
+def qid_of(data):
+    parts = data.split(":")
+    return parts[1] if len(parts) > 1 and parts[1] in QUESTS else "formula"
+
+
+def clue_count(flags, qid):
+    return sum(1 for f in flags if f in CLUES_BY_Q[qid])
 
 
 def hearts(hp):
     return "❤️" * hp + "🖤" * (MAX_HP - hp)
 
 
-def choice_ok(ch, q):
+def choice_ok(ch, q, qid):
     if "item" in ch and ch["item"] not in q["inv"]:
         return False, ch.get("hint", f"Нужен предмет: {ITEMS[ch['item']]}")
     for f in ch.get("all", []):
         if f not in q["flags"]:
             return False, ch.get("hint", "Не хватает улик")
-    if "clues" in ch and clue_count(q["flags"]) < ch["clues"]:
-        return False, f"Нужно улик: {ch['clues']} (сейчас {clue_count(q['flags'])})"
+    if "clues" in ch and clue_count(q["flags"], qid) < ch["clues"]:
+        return False, f"Нужно улик: {ch['clues']} (сейчас {clue_count(q['flags'], qid)})"
     return True, ""
 
 
-async def apply_node(uid, q, nid):
+async def apply_node(uid, qid, q, nid):
     """Применяет эффекты узла при входе. Возвращает список заметок для игрока."""
     n = NODES[nid]
     q["node"] = nid
@@ -1204,8 +1789,8 @@ async def apply_node(uid, q, nid):
     for f in n.get("flags", []):
         if f not in q["flags"]:
             q["flags"].append(f)
-            if f in CLUES:
-                notes.append(f"🧩 Новая улика: {CLUES[f]}")
+            if f in CLUES_BY_Q[qid]:
+                notes.append(f"🧩 Новая улика: {CLUES_BY_Q[qid][f]}")
 
     g = n.get("give")
     if g and g not in q["inv"]:
@@ -1228,12 +1813,13 @@ async def apply_node(uid, q, nid):
 
     if n.get("end"):
         eid = n["end"]
+        total = len(ENDINGS_BY_Q[qid])
         if eid not in q["endings"]:
             q["endings"].append(eid)
-            notes.append(f"✨ Новая концовка открыта! ({len(q['endings'])}/{len(ENDINGS)})")
+            notes.append(f"✨ Новая концовка открыта! ({len(q['endings'])}/{total})")
         else:
             notes.append("ℹ️ Эта концовка уже была открыта.")
-        if len(q["endings"]) >= len(ENDINGS) and "quest_final" not in q["claimed"]:
+        if len(q["endings"]) >= total and "quest_final" not in q["claimed"]:
             q["claimed"].append("quest_final")
             elapsed = max(0, int(time.time()) - q["started"])
             reward = final_reward(elapsed)
@@ -1244,139 +1830,175 @@ async def apply_node(uid, q, nid):
             notes.append(f"🏆 Квест пройден полностью за {fmt_time(elapsed)}! Награда: +{reward} коинов")
 
     if q["hp"] <= 0 and not n.get("end"):
-        q["node"] = "dead"
+        q["node"] = QUESTS[qid]["dead"]
     return notes
 
 
-def node_text(q, notes):
+def node_text(q, qid, notes):
     n = NODES[q["node"]]
-    head = f"{hearts(q['hp'])}   🧩 {clue_count(q['flags'])}   🎒 {len(q['inv'])}\n\n"
+    head = f"{hearts(q['hp'])}   🧩 {clue_count(q['flags'], qid)}   🎒 {len(q['inv'])}\n\n"
     body = n["t"]
     if n.get("end"):
         body += (f"\n\n🏁 <b>Концовка: {ENDINGS[n['end']]}</b>\n"
-                 f"Открыто концовок: {len(q['endings'])}/{len(ENDINGS)}")
+                 f"Открыто концовок: {len(q['endings'])}/{len(ENDINGS_BY_Q[qid])}")
     if notes:
         body += "\n\n" + "\n".join(notes)
     return head + body
 
 
-def node_kb(q):
+def node_kb(q, qid):
     nid = q["node"]
     n = NODES[nid]
     rows = []
     for i, ch in enumerate(n["c"]):
-        ok, _ = choice_ok(ch, q)
+        ok, _ = choice_ok(ch, q, qid)
         if ok:
             rows.append([InlineKeyboardButton(text=ch["l"], callback_data=f"q:{ch['to']}")])
         elif not ch.get("hide"):
-            rows.append([InlineKeyboardButton(text="🔒 " + ch["l"], callback_data=f"ql:{i}")])
+            rows.append([InlineKeyboardButton(text="🔒 " + ch["l"], callback_data=f"ql:{qid}:{i}")])
     if n.get("end") or n.get("fail"):
-        rows.append([InlineKeyboardButton(text="↩️ К последнему чекпоинту", callback_data="qcp")])
-        rows.append([InlineKeyboardButton(text="🔄 Новая игра (концовки сохранятся)", callback_data="qnew_yes")])
+        rows.append([InlineKeyboardButton(text="↩️ К последнему чекпоинту", callback_data=f"qcp:{qid}")])
+        rows.append([InlineKeyboardButton(text="🔄 Новая игра (концовки сохранятся)", callback_data=f"qnew_yes:{qid}")])
     rows.append([
-        InlineKeyboardButton(text="🎒 Блокнот", callback_data="qinv"),
+        InlineKeyboardButton(text="🎒 Блокнот", callback_data=f"qinv:{qid}"),
         InlineKeyboardButton(text="🏠 Меню", callback_data="back_menu"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def show_node(cb, q, notes=None):
-    if q["node"] not in NODES:
-        q["node"] = q["cp"] if q["cp"] in NODES else "hall"
-    await show(cb, node_text(q, notes or []), node_kb(q))
+async def show_node(cb, qid, q, notes=None):
+    if q["node"] not in NODES or NODES[q["node"]]["q"] != qid:
+        hub = QUESTS[qid]["hub"]
+        q["node"] = q["cp"] if q["cp"] in NODES and NODES[q["cp"]]["q"] == qid else hub
+    await show(cb, node_text(q, qid, notes or []), node_kb(q, qid))
 
 
-# ---------------------------- Хендлеры квеста ----------------------------
+# ---------------------------- Хендлеры квестов ----------------------------
 @dp.callback_query(F.data == "story_start")
 async def story_start(callback: types.CallbackQuery):
     await callback.answer()
     uid = callback.from_user.id
     await register_user(uid, callback.from_user.username or "NoName", callback.from_user.first_name or "Игрок")
-    q = await get_q(uid)
+    lines, rows = [], []
+    for qid, info in QUESTS.items():
+        q = await get_q(uid, qid)
+        done = len(q["endings"]) if q else 0
+        mark = "✅" if q and "quest_final" in q["claimed"] else ("▶️" if q else "🆕")
+        lines.append(f"{mark} {info['icon']} <b>{info['title']}</b>: концовок {done}/{len(ENDINGS_BY_Q[qid])}")
+        rows.append([btn(f"{info['icon']} {info['title']}", f"qinfo:{qid}")])
+    rows.append([btn("◀️ В меню", "back_menu")])
     text = (
-        "📖 <b>Эпичный квест: Тайна формулы</b>\n\n"
-        "🌊 Огромное расследование с десятками сцен, ветками, предметами и <b>7 концовками</b>. "
-        "Прогресс сохраняется автоматически.\n\n"
-        "🏆 <b>Награда одна, за все 7 концовок</b>, и зависит от времени с первого запуска:\n"
-        "до 1 ч — 5000, до 3 ч — 4000, до 6 ч — 3000, до 12 ч — 2000, до 24 ч — 1500, дольше — 1000."
+        "📖 <b>Эпичные квесты</b>\n\n" + "\n".join(lines) +
+        "\n\n⏳ <b>Лимит:</b> начать новый квест можно раз в сутки. Уже начатые квесты можно проходить когда угодно.\n\n" + REWARD_TEXT
+    )
+    await show(callback, text, kb_rows(rows))
+
+
+@dp.callback_query(F.data.startswith("qinfo:"))
+async def q_info(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    qid = qid_of(callback.data)
+    info = QUESTS[qid]
+    q = await get_q(uid, qid)
+    text = (
+        f"{info['icon']} <b>Квест: {info['title']}</b>\n\n{info['desc']}\n\n"
+        f"🌊 Огромное расследование с десятками сцен, ветками, предметами и <b>7 концовками</b>. Прогресс сохраняется автоматически.\n\n"
+        + REWARD_TEXT
     )
     rows = []
     if q:
-        text += (f"\n\n💾 <b>Твоё сохранение:</b>\n{hearts(q['hp'])}\n🧩 Улик: {clue_count(q['flags'])}/{len(CLUES)}\n"
-                 f"🎒 Предметов: {len(q['inv'])}\n🏁 Концовок: {len(q['endings'])}/{len(ENDINGS)}\n"
+        text += (f"\n\n💾 <b>Твоё сохранение:</b>\n{hearts(q['hp'])}\n🧩 Улик: {clue_count(q['flags'], qid)}/{len(CLUES_BY_Q[qid])}\n"
+                 f"🎒 Предметов: {len(q['inv'])}\n🏁 Концовок: {len(q['endings'])}/{len(ENDINGS_BY_Q[qid])}\n"
                  + ("✅ Награда за квест получена" if "quest_final" in q["claimed"]
                     else f"⏱ Время с первого запуска: {fmt_time(max(0, int(time.time()) - q['started']))}"))
-        rows.append([InlineKeyboardButton(text="▶️ Продолжить", callback_data="qgo")])
-        rows.append([InlineKeyboardButton(text="🎒 Блокнот", callback_data="qinv")])
-        rows.append([InlineKeyboardButton(text="🔄 Новая игра", callback_data="qnew_ask")])
+        rows.append([btn("▶️ Продолжить", f"qgo:{qid}")])
+        rows.append([btn("🎒 Блокнот", f"qinv:{qid}")])
+        rows.append([btn("🔄 Новая игра", f"qnew_ask:{qid}")])
     else:
-        rows.append([InlineKeyboardButton(text="🕵️ Начать расследование", callback_data="qgo")])
-    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")])
-    await show(callback, text, InlineKeyboardMarkup(inline_keyboard=rows))
+        gate = await quest_gate(uid)
+        if gate:
+            text += f"\n\n🔒 {gate}"
+        rows.append([btn("🕵️ Начать расследование", f"qgo:{qid}")])
+    rows.append([btn("◀️ К списку квестов", "story_start")])
+    await show(callback, text, kb_rows(rows))
 
 
-@dp.callback_query(F.data == "qgo")
+@dp.callback_query(F.data.startswith("qgo"))
 async def q_go(callback: types.CallbackQuery):
-    await callback.answer()
     uid = callback.from_user.id
+    qid = qid_of(callback.data)
     async with user_locks[uid]:
-        q = await get_q(uid)
+        q = await get_q(uid, qid)
         notes = []
         if not q:
-            q = new_q()
-            notes = await apply_node(uid, q, "intro")
-            await save_q(uid, q)
-        await show_node(callback, q, notes)
+            gate = await quest_gate(uid)
+            if gate:
+                await callback.answer(f"🔒 {gate}", show_alert=True)
+                return
+            await callback.answer()
+            await register_user(uid, callback.from_user.username or "NoName", callback.from_user.first_name or "Игрок")
+            q = new_q(qid)
+            notes = await apply_node(uid, qid, q, QUESTS[qid]["start"])
+            await save_q(uid, qid, q)
+            await mark_quest_start(uid)
+        else:
+            await callback.answer()
+        await show_node(callback, qid, q, notes)
 
 
-@dp.callback_query(F.data == "qnew_ask")
+@dp.callback_query(F.data.startswith("qnew_ask"))
 async def q_new_ask(callback: types.CallbackQuery):
     await callback.answer()
+    qid = qid_of(callback.data)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, начать заново", callback_data="qnew_yes")],
-        [InlineKeyboardButton(text="◀️ Отмена", callback_data="story_start")],
+        [InlineKeyboardButton(text="✅ Да, начать заново", callback_data=f"qnew_yes:{qid}")],
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"qinfo:{qid}")],
     ])
     await show(callback, "🔄 Начать квест заново?\n\nУлики, предметы и текущее место сбросятся. "
                          "Открытые концовки и уже полученные награды <b>сохранятся</b>.", kb)
 
 
-@dp.callback_query(F.data == "qnew_yes")
+@dp.callback_query(F.data.startswith("qnew_yes"))
 async def q_new_yes(callback: types.CallbackQuery):
     await callback.answer()
     uid = callback.from_user.id
+    qid = qid_of(callback.data)
     async with user_locks[uid]:
-        old = await get_q(uid)
-        q = new_q()
+        old = await get_q(uid, qid)
+        q = new_q(qid)
         if old:
             q["endings"] = old["endings"]
             q["claimed"] = old["claimed"]
             q["started"] = old["started"]
-        notes = await apply_node(uid, q, "intro")
-        await save_q(uid, q)
-        await show_node(callback, q, notes)
+        notes = await apply_node(uid, qid, q, QUESTS[qid]["start"])
+        await save_q(uid, qid, q)
+        await show_node(callback, qid, q, notes)
 
 
-@dp.callback_query(F.data == "qcp")
+@dp.callback_query(F.data.startswith("qcp"))
 async def q_checkpoint(callback: types.CallbackQuery):
     await callback.answer()
     uid = callback.from_user.id
+    qid = qid_of(callback.data)
     async with user_locks[uid]:
-        q = await get_q(uid)
+        q = await get_q(uid, qid)
         if not q:
             return
         q["hp"] = MAX_HP
-        q["node"] = q["cp"] if q["cp"] in NODES else "hall"
-        await save_q(uid, q)
-        await show_node(callback, q, ["💚 Здоровье восстановлено"])
+        q["node"] = q["cp"] if q["cp"] in NODES and NODES[q["cp"]]["q"] == qid else QUESTS[qid]["hub"]
+        await save_q(uid, qid, q)
+        await show_node(callback, qid, q, ["💚 Здоровье восстановлено"])
 
 
 @dp.callback_query(F.data.startswith("ql:"))
 async def q_locked(callback: types.CallbackQuery):
-    q = await get_q(callback.from_user.id)
+    qid = qid_of(callback.data)
+    q = await get_q(callback.from_user.id, qid)
     try:
-        idx = int(callback.data[3:])
+        idx = int(callback.data.split(":")[-1])
         ch = NODES[q["node"]]["c"][idx]
-        _, msg = choice_ok(ch, q)
+        _, msg = choice_ok(ch, q, qid)
     except Exception:
         msg = "Пока недоступно"
     await callback.answer(f"🔒 {msg}", show_alert=True)
@@ -1386,43 +2008,49 @@ async def q_locked(callback: types.CallbackQuery):
 async def q_move(callback: types.CallbackQuery):
     uid = callback.from_user.id
     target = callback.data[2:]
+    if target not in NODES:
+        await callback.answer("Эта кнопка устарела.")
+        return
+    qid = NODES[target]["q"]
     async with user_locks[uid]:
-        q = await get_q(uid)
+        q = await get_q(uid, qid)
         if not q:
             await callback.answer("Сохранение не найдено. Открой квест из меню.", show_alert=True)
             return
         cur = NODES.get(q["node"])
         ch = next((c for c in cur["c"] if c["to"] == target), None) if cur else None
-        if not ch or target not in NODES:
+        if not ch:
             await callback.answer("Эта кнопка устарела, продолжаем с текущего места.")
-            await show_node(callback, q)
+            await show_node(callback, qid, q)
             return
-        ok, msg = choice_ok(ch, q)
+        ok, msg = choice_ok(ch, q, qid)
         if not ok:
             await callback.answer(f"🔒 {msg}", show_alert=True)
             return
         await callback.answer()
-        notes = await apply_node(uid, q, target)
-        await save_q(uid, q)
-        await show_node(callback, q, notes)
+        notes = await apply_node(uid, qid, q, target)
+        await save_q(uid, qid, q)
+        await show_node(callback, qid, q, notes)
 
 
-@dp.callback_query(F.data == "qinv")
+@dp.callback_query(F.data.startswith("qinv"))
 async def q_inventory(callback: types.CallbackQuery):
-    await callback.answer()
     uid = callback.from_user.id
-    q = await get_q(uid)
+    qid = qid_of(callback.data)
+    q = await get_q(uid, qid)
     if not q:
         await callback.answer("Сначала начни квест", show_alert=True)
         return
+    await callback.answer()
+    clues_all = CLUES_BY_Q[qid]
     items = "\n".join(f"• {ITEMS[i]}" for i in q["inv"]) or "— пусто"
-    clues = "\n".join(f"• {CLUES[f]}" for f in q["flags"] if f in CLUES) or "— пока нет"
+    clues = "\n".join(f"• {clues_all[f]}" for f in q["flags"] if f in clues_all) or "— пока нет"
     ends = "\n".join(f"• {ENDINGS[e]}" for e in q["endings"]) or "— пока нет"
-    text = (f"🎒 <b>Блокнот детектива</b>\n\n{hearts(q['hp'])}\n\n<b>Предметы:</b>\n{items}\n\n"
-            f"<b>Улики ({clue_count(q['flags'])}/{len(CLUES)}):</b>\n{clues}\n\n"
-            f"<b>Концовки ({len(q['endings'])}/{len(ENDINGS)}):</b>\n{ends}")
+    text = (f"🎒 <b>Блокнот детектива: {QUESTS[qid]['title']}</b>\n\n{hearts(q['hp'])}\n\n<b>Предметы:</b>\n{items}\n\n"
+            f"<b>Улики ({clue_count(q['flags'], qid)}/{len(clues_all)}):</b>\n{clues}\n\n"
+            f"<b>Концовки ({len(q['endings'])}/{len(ENDINGS_BY_Q[qid])}):</b>\n{ends}")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Продолжить расследование", callback_data="qgo")],
+        [InlineKeyboardButton(text="▶️ Продолжить расследование", callback_data=f"qgo:{qid}")],
         [InlineKeyboardButton(text="🏠 Меню", callback_data="back_menu")],
     ])
     await show(callback, text, kb)
@@ -1461,21 +2089,84 @@ async def spin_wheel(callback: types.CallbackQuery):
     await show(callback, res, kb)
 
 
+# ---------------------------- 🎰 Казино: любая ставка ----------------------------
+bet_wait = set()    # пользователи, от которых ждём сумму ставки сообщением
+dice_busy = set()   # пользователи, у которых прямо сейчас катится кубик
+MAX_BET_DIGITS = 12
+
+
+def casino_kb():
+    return kb_rows([
+        [btn("🎲 50", "dice:50"), btn("🎲 100", "dice:100"), btn("🎲 500", "dice:500")],
+        [btn("💰 Своя ставка", "casino_bet")],
+        [btn("◀️ Назад", "back_menu")],
+    ])
+
+
 @dp.callback_query(F.data == "casino")
 async def casino(callback: types.CallbackQuery):
     await callback.answer()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Бросить кости (50 коинов)", callback_data="play_dice")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")],
-    ])
-    await show(callback, "🎰 <b>Казино</b>\n\n4, 5 или 6 — выигрыш +100.", kb)
+    bet_wait.discard(callback.from_user.id)
+    bal = await get_balance(callback.from_user.id)
+    await show(callback,
+               "🎰 <b>Казино</b>\n\nБросаешь кубик: выпало <b>4, 5 или 6</b> — выигрыш <b>x2</b> от ставки (чистая прибыль = ставка). "
+               "Выпало 1–3 — ставка сгорает.\n\n"
+               f"💰 Баланс: <b>{bal}</b>\nВыбери ставку или нажми «Своя ставка» и введи любую сумму.",
+               casino_kb())
 
 
-@dp.callback_query(F.data == "play_dice")
-async def play_dice(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "casino_bet")
+async def casino_bet(callback: types.CallbackQuery):
+    await callback.answer()
     uid = callback.from_user.id
-    if not await spend(uid, 50):
-        await callback.answer("❌ Мало коинов!", show_alert=True)
+    bal = await get_balance(uid)
+    bet_wait.add(uid)
+    await show(callback,
+               f"💰 <b>Своя ставка</b>\n\nНа счету: <b>{bal}</b> коинов.\n"
+               f"Отправь в чат число: сумму ставки (от 1 до {bal}).",
+               kb_rows([[btn("◀️ Отмена", "casino")]]))
+
+
+async def dice_round(uid, chat_id, bet):
+    if uid in dice_busy:
+        return
+    dice_busy.add(uid)
+    try:
+        if not await spend(uid, bet):
+            bal = await get_balance(uid)
+            await bot.send_message(
+                chat_id, f"❌ Не хватает коинов. Твой баланс: <b>{bal}</b>.",
+                reply_markup=kb_rows([[btn("💰 Другая ставка", "casino_bet")], [btn("◀️ В меню", "back_menu")]]),
+                parse_mode="HTML",
+            )
+            return
+        dice = await bot.send_dice(chat_id, emoji="🎲")
+        await asyncio.sleep(3.5)
+        val = dice.dice.value
+        if val >= 4:
+            await add_coins(uid, bet * 2)
+            res = f"🎉 Выпало {val}! Выигрыш: <b>+{bet} коинов</b> (ставка вернулась x2)!"
+        else:
+            res = f"😢 Выпало {val}. Проигрыш: <b>−{bet} коинов</b>."
+        bal = await get_balance(uid)
+        kb = kb_rows([
+            [btn(f"🎲 Ещё раз ({bet})", f"dice:{bet}")],
+            [btn("💰 Другая ставка", "casino_bet")],
+            [btn("◀️ Назад в меню", "back_menu")],
+        ])
+        await bot.send_message(chat_id, f"{res}\n💰 Баланс: <b>{bal}</b>", reply_markup=kb, parse_mode="HTML")
+    finally:
+        dice_busy.discard(uid)
+
+
+async def dice_from_callback(callback: types.CallbackQuery, bet: int):
+    uid = callback.from_user.id
+    if uid in dice_busy:
+        await callback.answer("🎲 Кубик ещё катится, подожди секунду.")
+        return
+    bal = await get_balance(uid)
+    if bet <= 0 or bet > bal:
+        await callback.answer(f"❌ Мало коинов! Баланс: {bal}", show_alert=True)
         return
     await callback.answer()
     chat_id = callback.message.chat.id
@@ -1483,19 +2174,41 @@ async def play_dice(callback: types.CallbackQuery):
         await callback.message.delete()
     except TelegramBadRequest:
         pass
-    dice = await bot.send_dice(chat_id, emoji="🎲")
-    await asyncio.sleep(3)
-    val = dice.dice.value
-    if val >= 4:
-        await add_coins(uid, 100)
-        res = f"🎉 Выпало {val}! Выигрыш: <b>+100 коинов</b>!"
-    else:
-        res = f"😢 Выпало {val}. Проигрыш."
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Ещё раз (50)", callback_data="play_dice")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")],
-    ])
-    await bot.send_message(chat_id, res, reply_markup=kb, parse_mode="HTML")
+    await dice_round(uid, chat_id, bet)
+
+
+@dp.callback_query(F.data.startswith("dice:"))
+async def play_dice_bet(callback: types.CallbackQuery):
+    try:
+        bet = int(callback.data.split(":")[1])
+    except ValueError:
+        await callback.answer()
+        return
+    await dice_from_callback(callback, bet)
+
+
+@dp.callback_query(F.data == "play_dice")
+async def play_dice_old(callback: types.CallbackQuery):
+    # совместимость со старыми кнопками
+    await dice_from_callback(callback, 50)
+
+
+@dp.message(F.text, lambda m: m.from_user.id in bet_wait)
+async def bet_message(message: types.Message):
+    uid = message.from_user.id
+    raw = message.text.strip().replace(" ", "").replace(",", "").replace("_", "")
+    if not raw.isdigit() or int(raw) <= 0 or len(raw) > MAX_BET_DIGITS:
+        await message.answer("Введи целое положительное число, например <b>250</b>.", parse_mode="HTML",
+                             reply_markup=kb_rows([[btn("◀️ Отмена", "casino")]]))
+        return
+    bet = int(raw)
+    bal = await get_balance(uid)
+    if bet > bal:
+        await message.answer(f"❌ Столько нет на счету. Твой баланс: <b>{bal}</b>. Введи сумму поменьше.", parse_mode="HTML",
+                             reply_markup=kb_rows([[btn("◀️ Отмена", "casino")]]))
+        return
+    bet_wait.discard(uid)
+    await dice_round(uid, message.chat.id, bet)
 
 
 @dp.callback_query(F.data == "game_jelly")
@@ -1606,15 +2319,16 @@ async def top(callback: types.CallbackQuery):
 async def main():
     logging.basicConfig(level=logging.INFO)
     if TOKEN.startswith("ВСТАВЬ"):
-        raise SystemExit("Укажи токен в BOT_TOKEN (или в переменной TOKEN в коде).")
-    # Проверка графа квеста: все ссылки должны вести на существующие узлы
+        raise SystemExit("Укажи токен в переменной окружения BOT_TOKEN.")
+    # Проверка графа квестов: все ссылки должны вести на существующие узлы
     for nid, node in NODES.items():
         for ch in node["c"]:
             assert ch["to"] in NODES, f"Квест: узел '{nid}' ведёт в несуществующий '{ch['to']}'"
+            assert NODES[ch["to"]]["q"] == node["q"], f"Квест: узел '{nid}' ведёт в другой квест '{ch['to']}'"
     await db_start()
     dp.message.outer_middleware(SubscriptionMiddleware())
     dp.callback_query.outer_middleware(SubscriptionMiddleware())
-    print(f"Бот запущен. База: {DB_FILE}. Узлов в квесте: {len(NODES)}")
+    print(f"Бот запущен. База: {DB_FILE}. Узлов в квестах: {len(NODES)}")
     await dp.start_polling(bot)
 
 
