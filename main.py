@@ -8,13 +8,12 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 TOKEN = '8660698360:AAEGVQen4KR8MXC3bJXZqDkAijZRZdttMfs'
-OWNER_ID = 7605961809  # Твой ID без КД
+OWNER_ID = 7605961809
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DB_FILE = "database.db"
 
-# Инициализация базы данных
 async def db_start():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -31,7 +30,6 @@ async def db_start():
         """)
         await db.commit()
 
-# Безопасная регистрация
 async def register_user(user_id: int, username: str, full_name: str, referrer_id: int = None):
     safe_name = "".join(c for c in full_name if c.isalnum() or c in " _-").strip()
     if not safe_name:
@@ -51,12 +49,11 @@ async def register_user(user_id: int, username: str, full_name: str, referrer_id
                     await db.execute("UPDATE users SET balance = balance + 100 WHERE user_id = ?", (user_id,))
                 await db.commit()
 
-# Главное меню
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🍔 Повар в Красти Краб", callback_data="chef_work"),
-            InlineKeyboardButton(text="📖 Сюжетный квест", callback_data="story_start")
+            InlineKeyboardButton(text="📖 Эпичный квест", callback_data="story_start")
         ],
         [
             InlineKeyboardButton(text="🎰 Казино (Кости)", callback_data="casino"),
@@ -91,11 +88,11 @@ async def cmd_start(message: types.Message):
     user_display_name = message.from_user.first_name or "Игрок"
     await register_user(message.from_user.id, message.from_user.username or "NoName", user_display_name, referrer_id)
     
-    text = (
-        f"Здорово, **{user_display_name}**! 👋\n\n"
-        "Бот полностью перезапущен и готов к работе. Ошибки обработки кнопок устранены!"
+    await message.answer(
+        f"Здорово, **{user_display_name}**! 👋\n\nБот запущен! Квест полностью расширен до огромного масштаба с кучей развилок и шагов.",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
     )
-    await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "balance")
 async def process_balance(callback: types.CallbackQuery):
@@ -105,17 +102,11 @@ async def process_balance(callback: types.CallbackQuery):
             row = await cursor.fetchone()
             balance, jobs, status = row if row else (500, 0, 'not_started')
 
-    story_text = "✅ Завершен" if status == 'completed' else "⏳ В процессе / Доступен"
-    text = (
-        f"👤 **Твой профиль:**\n\n"
-        f"💰 Баланс: **{balance} коинов**\n"
-        f"🛠 Выполнено смен: **{jobs}**\n"
-        f"📖 Сюжетный статус: **{story_text}**"
-    )
+    story_text = "✅ Пройден" if status == 'completed' else "⏳ Доступен"
+    text = f"👤 **Твой профиль:**\n\n💰 Баланс: **{balance} коинов**\n🛠 Смен: **{jobs}**\n📖 Квест: **{story_text}**"
     await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-
-# --- МИНИ-ИГРА: ПОВАР (Без КД для тебя) ---
+# --- Повар ---
 chef_active_orders = {}
 
 @dp.callback_query(F.data == "chef_work")
@@ -132,7 +123,7 @@ async def chef_work_menu(callback: types.CallbackQuery):
 
             if current_time - last_work < cooldown:
                 left = int(cooldown - (current_time - last_work))
-                await callback.answer(f"⏳ Кухня занята! Следующая смена через {left} сек.", show_alert=True)
+                await callback.answer(f"⏳ Кухня занята! Подожди {left} сек.", show_alert=True)
                 return
 
     layers_pool = [
@@ -141,7 +132,6 @@ async def chef_work_menu(callback: types.CallbackQuery):
         ("cheese", "🧀 Сыр"),
         ("salad", "🥬 Салат"),
         ("tomato", "🍅 Помидор"),
-        ("sauce", " соус"),
         ("bun_bot", "🍞 Нижняя булочка")
     ]
     
@@ -150,10 +140,7 @@ async def chef_work_menu(callback: types.CallbackQuery):
     recipe_text = " ➡️ ".join([item[1] for item in recipe])
 
     await callback.message.edit_text(
-        f"🍔 **Смена: Повар в «Красти Краб»**\n\n"
-        f"📜 **Запомни полный рецепт бургера:**\n"
-        f"👉 <code>{recipe_text}</code>\n\n"
-        f"⏱ У тебя есть **5 секунд** на запоминание...",
+        f"🍔 **Повар в «Красти Краб»**\n\n📜 **Запомни рецепт:**\n👉 <code>{recipe_text}</code>\n\n⏱ У тебя **5 секунд**...",
         parse_mode="HTML"
     )
     await asyncio.sleep(5)
@@ -174,27 +161,21 @@ async def show_chef_step(message, user_id):
         ("cheese", "🧀 Сыр"),
         ("salad", "🥬 Салат"),
         ("tomato", "🍅 Помидор"),
-        ("sauce", " соус"),
         ("bun_bot", "🍞 Нижняя булочка")
     ]
     random.shuffle(options)
 
-    kb_buttons = []
-    for key, name in options:
-        res_type = "next" if key == correct_key else "fail"
-        kb_buttons.append([InlineKeyboardButton(text=name, callback_data=f"chefstep_{res_type}")])
-
+    kb_buttons = [[InlineKeyboardButton(text=name, callback_data=f"chefstep_{'next' if key == correct_key else 'fail'}")] for key, name in options]
     kb_buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="back_menu")])
 
     try:
         await message.edit_text(
-            f"🍳 **Сборка бургера (Шаг {step + 1} из {len(recipe)}):**\n\n"
-            f"Какой слой должен идти по памяти?",
+            f"🍳 **Сборка (Шаг {step + 1} из {len(recipe)}):**\nКакой слой следующий?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons),
             parse_mode="HTML"
         )
-    except Exception as e:
-        print(f"Error in show_chef_step: {e}")
+    except:
+        pass
 
 @dp.callback_query(F.data.startswith("chefstep_"))
 async def chef_step_handler(callback: types.CallbackQuery):
@@ -214,12 +195,7 @@ async def chef_step_handler(callback: types.CallbackQuery):
             async with aiosqlite.connect(DB_FILE) as db:
                 await db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (current_time, user_id))
                 await db.commit()
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🍔 На кухню", callback_data="chef_work")],
-            [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
-        ])
-        await callback.message.edit_text("❌ **Ошибка в слоях!** Заказ испорчен.", reply_markup=kb, parse_mode="Markdown")
+        await callback.message.edit_text("❌ Ошибка в слоях! Заказ испорчен.", reply_markup=get_back_keyboard(), parse_mode="Markdown")
         return
 
     order["step"] += 1
@@ -229,318 +205,247 @@ async def chef_step_handler(callback: types.CallbackQuery):
         del chef_active_orders[user_id]
         reward = random.randint(150, 250)
         async with aiosqlite.connect(DB_FILE) as db:
-            await db.execute(
-                "UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, last_work = ? WHERE user_id = ?",
-                (reward, current_time, user_id)
-            )
+            await db.execute("UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, last_work = ? WHERE user_id = ?", (reward, current_time, user_id))
             await db.commit()
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🍔 Новый заказ", callback_data="chef_work")],
-            [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
-        ])
-        await callback.message.edit_text(f"✅ **Шедевр!** Бургер собран идеально! Награда: **+{reward} коинов** 🍔", reply_markup=kb, parse_mode="Markdown")
-
-
-# МИНИ-ИГРЫ (Тир и КНБ)
-@dp.callback_query(F.data == "game_jelly")
-async def game_jelly_menu(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Стрелять! (60 коинов)", callback_data="shoot_jelly")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
-    ])
-    await callback.message.edit_text("🎯 **Тир по медузам**\n\nЦена выстрела: 60 коинов.", reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "shoot_jelly")
-async def shoot_jelly(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    async with aiosqlite.connect(DB_FILE) as db:
-        row = await (await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))).fetchone()
-        balance = row[0] if row else 500
-        if balance < 60:
-            await callback.answer("❌ Мало коинов!", show_alert=True)
-            return
-        await db.execute("UPDATE users SET balance = balance - 60 WHERE user_id = ?", (user_id,))
-        await db.commit()
-
-    await callback.message.edit_text("🎯 Выстрел...")
-    await asyncio.sleep(2)
-    outcome = random.choices(["miss", "normal", "golden"], weights=[40, 45, 15], k=1)[0]
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        if outcome == "normal":
-            await db.execute("UPDATE users SET balance = balance + 100 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            res = "🎯 Поймана обычная медуза: **+100 коинов**!"
-        elif outcome == "golden":
-            await db.execute("UPDATE users SET balance = balance + 250 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            res = "🌟 ДЖЕКПОТ! Золотая медуза: **+250 коинов**!"
-        else:
-            res = "💨 Промах, медуза уплыла."
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Еще раз", callback_data="game_jelly")],
-        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
-    ])
-    await callback.message.edit_text(res, reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "game_rps")
-async def game_rps_menu(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🪨 Камень", callback_data="rps_rock"),
-            InlineKeyboardButton(text="✂️ Ножницы", callback_data="rps_scissors"),
-            InlineKeyboardButton(text="📄 Бумага", callback_data="rps_paper")
-        ],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
-    ])
-    await callback.message.edit_text("✂️ **КНБ с Патриком** (Ставка: 50 коинов)", reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("rps_"))
-async def play_rps(callback: types.CallbackQuery):
-    user_choice = callback.data.replace("rps_", "")
-    user_id = callback.from_user.id
-    async with aiosqlite.connect(DB_FILE) as db:
-        row = await (await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))).fetchone()
-        balance = row[0] if row else 500
-        if balance < 50:
-            await callback.answer("❌ Мало коинов!", show_alert=True)
-            return
-        await db.execute("UPDATE users SET balance = balance - 50 WHERE user_id = ?", (user_id,))
-        await db.commit()
-
-    bot_choice = random.choice(["rock", "scissors", "paper"])
-    if user_choice == bot_choice:
-        res = "draw"
-    elif (user_choice == "rock" and bot_choice == "scissors") or (user_choice == "scissors" and bot_choice == "paper") or (user_choice == "paper" and bot_choice == "rock"):
-        res = "win"
-    else:
-        res = "lose"
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        if res == "win":
-            await db.execute("UPDATE users SET balance = balance + 100 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            text = "🎉 Победа! Выигрыш: **+100 коинов**!"
-        elif res == "draw":
-            await db.execute("UPDATE users SET balance = balance + 50 WHERE user_id = ?", (user_id,))
-            await db.commit()
-            text = "🤝 Ничья! Ставка возвращена."
-        else:
-            text = "😢 Проигрыш. Ставка сгорела."
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Еще", callback_data="game_rps")],
-        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
-    ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-
+        await callback.message.edit_text(f"✅ Идеально! Награда: **+{reward} коинов** 🍔", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 # ==========================================
-# --- МАСШТАБНЫЙ МНОГОЭТАПНЫЙ КВЕСТ ---
+# --- МАСШТАБНЫЙ КВЕСТ (БОЛЕЕ 20 КНОПОК / ШАГОВ) ---
 # ==========================================
 
 @dp.callback_query(F.data == "story_start")
 async def story_start(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET story_status = 'in_progress' WHERE user_id = ?", (user_id,))
-        await db.commit()
-
     text = (
         "📖 **Глава 1: Ночной грабеж в «Красти Краб»**\n\n"
-        "Сейф взломан, секретный экстракт украден! У тебя есть три глобальные ветки расследования. Выбирай свой путь:"
+        "Сейф взломан дочиста! Экстракт пропал. Тебе предстоит масштабное расследование. Выбирай первую глобальную ветку:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Ветка 1: Внимательно изучить улики", callback_data="clues_start")],
-        [InlineKeyboardButton(text="🕵️‍♂️ Ветка 2: Допрос Губки Боба", callback_data="bob_start")],
-        [InlineKeyboardButton(text="📹 Ветка 3: Взломать систему камер", callback_data="cam_start")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
+        [InlineKeyboardButton(text="🔍 Ветка 1: Глубокий анализ улик", callback_data="v1_step1")],
+        [InlineKeyboardButton(text="🕵️‍♂️ Ветка 2: Расследование с Губкой Бобом", callback_data="v2_step1")],
+        [InlineKeyboardButton(text="📹 Ветка 3: Хакерский взлом архива камер", callback_data="v3_step1")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-
-# ==========================================
-# ВЕТКА 1: ИЗУЧЕНИЕ УЛИК
-# ==========================================
-@dp.callback_query(F.data == "clues_start")
-async def clues_start(callback: types.CallbackQuery):
-    text = (
-        "📖 **Ветка 1: Улики на месте преступления**\n\n"
-        "Ты тщательно осматриваешь сейф. Улики указывают сразу на троих подозреваемых: **Сквидвард** (его трость оставила царапину), "
-        "**Планктон** (следы радиоактивной грязи) и **Патрик** (крошки водорослевого мороженого).\n\n"
-        "Улик слишком мало, чтобы сразу назвать вора. Что предпримем?"
-    )
+# --- ВЕТКА 1: УЛИКИ (Шанс оступиться и много шагов) ---
+@dp.callback_query(F.data == "v1_step1")
+async def v1_step1(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗣 Распросить каждого подозреваемого лично", callback_data="clues_interrogate_all")],
-        [InlineKeyboardButton(text="📹 Посмотреть видеокамеры архива", callback_data="cam_start")],
-        [InlineKeyboardButton(text="🔬 Провести анализ улик в лаборатории", callback_data="clues_lab")],
-        [InlineKeyboardButton(text="◀️ На главную развилку квеста", callback_data="story_start")]
+        [InlineKeyboardButton(text="🔎 Осмотреть замок на сейфе", callback_data="v1_step2_lock")],
+        [InlineKeyboardButton(text="🔎 Осмотреть пол около кассы", callback_data="v1_step2_floor")],
+        [InlineKeyboardButton(text="🔙 На главную развилку", callback_data="story_start")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 1 [Шаг 1/6]:** Ты заходишь в кабинет. С чего начнешь осмотр места преступления?", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clues_interrogate_all")
-async def clues_interrogate_all(callback: types.CallbackQuery):
-    text = (
-        "📖 **Допрос подозреваемых:**\n\n"
-        "• **Сквидвард** раздражен: *«Я спал дома!»*\n"
-        "• **Планктон** смеется: *«Ха! Докажи!»*\n"
-        "• **Патрик** жует мороженое: *«А что такое экстракт?»*\n\n"
-        "Кто из них вызывает наибольшее подозрение?"
-    )
+@dp.callback_query(F.data == "v1_step2_lock")
+async def v1_step2_lock(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👉 Обвинить Сквидварда", callback_data="clues_fail_squid")],
-        [InlineKeyboardButton(text="👉 Обвинить Планктона", callback_data="clues_win_plankton")],
-        [InlineKeyboardButton(text="👉 Обвинить Патрика", callback_data="clues_fail_pat")],
-        [InlineKeyboardButton(text="🔙 Назад к уликам", callback_data="clues_start")]
+        [InlineKeyboardButton(text="🔬 Взять соскоб метала на анализ", callback_data="v1_step3_lab")],
+        [InlineKeyboardButton(text="🗣 Сравнить царапины с тростью Сквидварда", callback_data="v1_step3_squid")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v1_step1")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 1 [Шаг 2/6]:** На замке обнаружены глубокие царапины от тупого тяжелого предмета.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clues_lab")
-async def clues_lab(callback: types.CallbackQuery):
-    text = (
-        "📖 **Лабораторный анализ**\n\n"
-        "В микроскоп ты видишь, что следы грязи содержат ДНК планктона и отпечатки Патрика. Как трактуем?"
-    )
+@dp.callback_query(F.data == "v1_step2_floor")
+async def v1_step2_floor(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Это подстава Планктона против Патрика", callback_data="clues_win_plankton")],
-        [InlineKeyboardButton(text="🧪 Патрик сообщник", callback_data="clues_fail_pat")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="clues_start")]
+        [InlineKeyboardButton(text="🧪 Проверить состав грязи химикатами", callback_data="v1_step3_lab")],
+        [InlineKeyboardButton(text="🧁 Попробовать крошки на вкус", callback_data="v1_fail_floor")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v1_step1")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 1 [Шаг 2/6]:** На полу валяются странные радиоактивные следы и крошки неизвестного происхождения.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clues_fail_squid")
-async def clues_fail_squid(callback: types.CallbackQuery):
-    await callback.message.edit_text("📖 Сквидвард подал в суд за клевету. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data == "v1_fail_floor")
+async def v1_fail_floor(callback: types.CallbackQuery):
+    await callback.message.edit_text("🤢 Ты отравился неизвестными крошками и попал в больницу. Расследование провалено!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clues_fail_pat")
-async def clues_fail_pat(callback: types.CallbackQuery):
-    await callback.message.edit_text("📖 Патрик просто ел мороженое. Ошибка!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data == "v1_step3_squid")
+async def v1_step3_squid(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚪 Вломиться к нему домой без ордера", callback_data="v1_fail_squid_house")],
+        [InlineKeyboardButton(text="📝 Вызвать его на допрос в кабинет", callback_data="v1_step4_interrogate")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v1_step2_lock")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 1 [Шаг 3/6]:** Царапины похожи на трость Сквидварда, но диаметр не совпадает.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clues_win_plankton")
-async def clues_win_plankton(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "v1_fail_squid_house")
+async def v1_fail_squid_house(callback: types.CallbackQuery):
+    await callback.message.edit_text("📖 Сквидвард вызвал полицию за вторжение в частную собственность. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v1_step3_lab")
+async def v1_step3_lab(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Сравнить ДНК с базой Чам Баккет", callback_data="v1_step4_dna")],
+        [InlineKeyboardButton(text="🗑 Выкинуть результаты и гадать дальше", callback_data="v1_step1")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v1_step2_lock")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 1 [Шаг 3/6]:** Экспресс-анализ в лаборатории показал наличие следов водорослевого топлива.", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v1_step4_interrogate")
+@dp.callback_query(F.data == "v1_step4_dna")
+async def v1_step4_final(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚖️ Передать дело судье Наточнику", callback_data="v1_step5_judge")],
+        [InlineKeyboardButton(text="🪤 Устроить личную засаду на подозреваемого", callback_data="v1_step5_trap")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 1 [Шаг 4/6]:** Улики указывают прямо на подземную лабораторию Планктона под Чам Баккет. Твой финальный ход?", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v1_step5_judge")
+async def v1_step5_judge(callback: types.CallbackQuery):
+    await callback.message.edit_text("📖 Пока судья оформлял бумажки, Планктон сбежал из города. Улика потеряна. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v1_step5_trap")
+async def v1_step5_trap(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET balance = balance + 600, story_status = 'completed' WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE users SET balance = balance + 700, story_status = 'completed' WHERE user_id = ?", (user_id,))
         await db.commit()
-    await callback.message.edit_text(
-        "🏆 **ТРИУМФ! Гениальная дедукция!**\n\n"
-        "Ты доказал вину Планктона! Экстракт возвращен.\n"
-        "💰 Награда: **+600 коинов** зачислено!",
-        reply_markup=get_back_keyboard(), parse_mode="Markdown"
-    )
+    await callback.message.edit_text("🏆 **Ветка 1 [ФИНАЛ]:** Твоя засада сработала идеально! Планктон пойман с поличным.\n💰 Награда: **+700 коинов** зачислена!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 
-# ==========================================
-# ВЕТКА 2: ДОПРОС ГУБКИ БОБА
-# ==========================================
-@dp.callback_query(F.data == "bob_start")
-async def bob_start(callback: types.CallbackQuery):
-    text = (
-        "📖 **Ветка 2: Разговор с Губкой Бобом**\n\n"
-        "Боб говорит, что слышал подозрительные звуки сзади ресторана ночью.\n"
-        "Что сделаешь?"
-    )
+# --- ВЕТКА 2: ГУБКА БОБ (Ссора, примирение, развилки) ---
+@dp.callback_query(F.data == "v2_step1")
+async def v2_step1(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚨 Обвинить Боба в краже", callback_data="bob_blame_direct")],
-        [InlineKeyboardButton(text="🤝 Объединить с ним силы", callback_data="bob_team_up")],
-        [InlineKeyboardButton(text="◀️ На главную развилку квеста", callback_data="story_start")]
+        [InlineKeyboardButton(text="🚨 Жестко обвинить Боба в соучастии", callback_data="v2_step2_blame")],
+        [InlineKeyboardButton(text="🤝 Обнять его и предложить помощь", callback_data="v2_step2_hug")],
+        [InlineKeyboardButton(text="🔙 На главную развилку", callback_data="story_start")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 2 [Шаг 1/6]:** Губка Боб горько плачет на кухне и говорит, что слышал подозрительный шум ночью.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "bob_blame_direct")
-async def bob_blame_direct(callback: types.CallbackQuery):
-    text = "📖 Боб смертельно обиделся и плачет. Что предпримем?"
+@dp.callback_query(F.data == "v2_step2_blame")
+async def v2_step2_blame(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍫 Извиниться и помириться", callback_data="bob_team_up")],
-        [InlineKeyboardButton(text="🚶‍♂️ Работать в одиночку", callback_data="bob_solo")],
-        [InlineKeyboardButton(text="🐙 Пойти к Сквидварду", callback_data="bob_ask_squid")]
+        [InlineKeyboardButton(text="🍫 Извиниться перед ним за грубость", callback_data="v2_step2_hug")],
+        [InlineKeyboardButton(text="🚶‍♂️ Уйти и хлопок дверью", callback_data="v2_fail_sulk")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v2_step1")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 2 [Шаг 2/6]:** Боб обиделся до глубины души, закрылся в кладовой и отказывается говорить.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "bob_solo")
-async def bob_solo(callback: types.CallbackQuery):
-    await callback.message.edit_text("📖 Без повара ты запутался и упустил вора. Провал.", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data == "v2_fail_sulk")
+async def v2_fail_sulk(callback: types.CallbackQuery):
+    await callback.message.edit_text("📖 Без помощи повара ресторан закрылся из-за антисанитарии. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "bob_ask_squid")
-async def bob_ask_squid(callback: types.CallbackQuery):
-    await callback.message.edit_text("📖 Сквидвард захлопнул дверь. Тупик.", reply_markup=get_back_keyboard(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "bob_team_up")
-async def bob_team_up(callback: types.CallbackQuery):
-    text = "📖 Вы строите совместную ловушку с Бобом. Куда ставим капкан?"
+@dp.callback_query(F.data == "v2_step2_hug")
+async def v2_step2_hug(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🪤 У входа в «Красти Краб»", callback_data="bob_trap_fail")],
-        [InlineKeyboardButton(text="🪤 У вентиляции «Чам Баккет»", callback_data="bob_win")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="bob_start")]
+        [InlineKeyboardButton(text="🪤 Построить секретную ловушку из лопаток", callback_data="v2_step3_trap")],
+        [InlineKeyboardButton(text="🔦 Идти патрулировать темный переулок", callback_data="v2_step3_alley")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v2_step1")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 2 [Шаг 2/6]:** Вы помирились! Боб вспомнил, что у вора была металлическая нога.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "bob_trap_fail")
-async def bob_trap_fail(callback: types.CallbackQuery):
-    await callback.message.edit_text("📖 Вор обошел ловушку через крышу!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data == "v2_step3_alley")
+async def v2_step3_alley(callback: types.CallbackQuery):
+    await callback.message.edit_text("📖 В темном переулке на вас напала медуза-мутант. Вы сбежали в страхе. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "bob_win")
-async def bob_win(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "v2_step3_trap")
+async def v2_step3_trap(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧪 Залить в ловушку порцию горчицы", callback_data="v2_step4_ mustard")],
+        [InlineKeyboardButton(text="⚡ Подключить ток от генератора", callback_data="v2_fail_shock")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v2_step2_hug")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 2 [Шаг 3/6]:** Ловушка из лопаток готова у входа. Какой сюрприз подготовим внутри?", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v2_fail_shock")
+async def v2_fail_shock(callback: types.CallbackQuery):
+    await callback.message.edit_text("⚡ Вы случайно замкнули проводку и сожгли весь Красти Краб. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v2_step4_ mustard")
+async def v2_step4_mustard(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🕵️‍♂️ Ждать в засаде до утра", callback_data="v2_win")],
+        [InlineKeyboardButton(text="💤 Уйти спать и проверить утром", callback_data="v2_fail_sleep")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 2 [Шаг 4/6]:** Горчичная ловушка замаскирована безупречно. Осталось дождаться вора.", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v2_fail_sleep")
+async def v2_fail_sleep(callback: types.CallbackQuery):
+    await callback.message.edit_text("📖 Утром ловушка была пуста, а экстракт исчез окончательно. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v2_win")
+async def v2_win(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET balance = balance + 550, story_status = 'completed' WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE users SET balance = balance + 650, story_status = 'completed' WHERE user_id = ?", (user_id,))
         await db.commit()
-    await callback.message.edit_text(
-        "🎉 **Победа с Губкой Бобом!**\n\nПланктон пойман в вентиляции.\n💰 Награда: **+550 коинов** зачислено!",
-        reply_markup=get_back_keyboard(), parse_mode="Markdown"
-    )
+    await callback.message.edit_text("🏆 **Ветка 2 [ФИНАЛ]:** Ночью вор попался в горчичную ловушку — это был Планктон! Вы с Бобом герои.\n💰 Награда: **+650 коинов** зачислена!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 
-# ==========================================
-# ВЕТКА 3: ВЗЛОМ КАМЕР
-# ==========================================
-@dp.callback_query(F.data == "cam_start")
-async def cam_start(callback: types.CallbackQuery):
-    text = (
-        "📖 **Ветка 3: Кабинет видеонаблюдения**\n\n"
-        "**Этап 1:** Реши математический пример:\n🔢 `(50 - 14) / 4 = ?`"
-    )
+# --- ВЕТКА 3: КАМЕРЫ (Многоэтапный хакерский взлом) ---
+@dp.callback_query(F.data == "v3_step1")
+async def v3_step1(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="8", callback_data="cam_fail"), InlineKeyboardButton(text="9", callback_data="cam_stage2")],
-        [InlineKeyboardButton(text="12", callback_data="cam_fail")]
+        [InlineKeyboardButton(text="🔢 Решить пример: (50 - 14) / 4", callback_data="v3_step2_math")],
+        [InlineKeyboardButton(text="🔨 Постучать по системному блоку молотком", callback_data="v3_fail_hammer")],
+        [InlineKeyboardButton(text="🔙 На главную развилку", callback_data="story_start")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 3 [Шаг 1/6]:** Терминал видеонаблюдения заблокирован сложным криптографическим паролем.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_fail")
-async def cam_fail(callback: types.CallbackQuery):
-    await callback.message.edit_text("💥 Сработала сигнализация! Терминал заблокирован.", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+@dp.callback_query(F.data == "v3_fail_hammer")
+async def v3_fail_hammer(callback: types.CallbackQuery):
+    await callback.message.edit_text("🔨 От удара молотком монитор взорвался осколками тебе в лицо. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_stage2")
-async def cam_stage2(callback: types.CallbackQuery):
-    text = "📖 **Этап 2:** Какая деталь бросается в глаза на видео в 3:00 ночи?"
+@dp.callback_query(F.data == "v3_step2_math")
+async def v3_step2_math(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💡 Зеленое свечение антенны", callback_data="cam_stage3")],
-        [InlineKeyboardButton(text="💡 Желтая текстура", callback_data="cam_fail")],
-        [InlineKeyboardButton(text="💡 Кларнет", callback_data="cam_fail")]
+        [InlineKeyboardButton(text="🔴 Перерезать красный провод", callback_data="v3_fail_wire")],
+        [InlineKeyboardButton(text="🔵 Перерезать синий провод", callback_data="v3_step3_wire")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v3_step1")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 3 [Шаг 2/6]:** Доступ к файлам открыт, но срабатывает система защиты с таймером и цветными проводами.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_stage3")
-async def cam_stage3(callback: types.CallbackQuery):
-    text = "📖 **Этап 3:** Кто взломал сейф по данным камер?"
+@dp.callback_query(F.data == "v3_fail_wire")
+async def v3_fail_wire(callback: types.CallbackQuery):
+    await callback.message.edit_text("💥 Не тот провод! Произошел мощный взрыв платы. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v3_step3_wire")
+async def v3_step3_wire(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Шелдон Планктон", callback_data="cam_ultimate_win")],
-        [InlineKeyboardButton(text="🔴 Сам Мистер Крабс", callback_data="cam_fail")]
+        [InlineKeyboardButton(text="⏩ Включить видео на х16 скорости", callback_data="v3_step4_fast")],
+        [InlineKeyboardButton(text="🐢 Смотреть покадрово с 3:00 ночи", callback_data="v3_step4_slow")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v3_step2_math")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 **Ветка 3 [Шаг 3/6]:** Защита снята! Архив видеозаписей за ночь загружается на экран.", reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_ultimate_win")
-async def cam_ultimate_win(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "v3_step4_fast")
+async def v3_step4_fast(callback: types.CallbackQuery):
+    await callback.message.edit_text("⏩ На быстрой перемотке ты пропустил момент кражи и ничего не увидел. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v3_step4_slow")
+async def v3_step4_slow(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Увеличить отражение в глазу вора", callback_data="v3_step5_face")],
+        [InlineKeyboardButton(text="🔊 Усилить звук шагов", callback_data="v3_fail_audio")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v3_step3_wire")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 3 [Шаг 4/6]:** Покопавшись в покадровой записи, ты замечаешь силуэт человека в маске.", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v3_fail_audio")
+async def v3_fail_audio(callback: types.CallbackQuery):
+    await callback.message.edit_text("🔊 Динамики выдали ужасный ультразвуковой писк, оглушивший тебя. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v3_step5_face")
+async def v3_step5_face(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Подтвердить: это Шелдон Планктон", callback_data="v3_win")],
+        [InlineKeyboardButton(text="🟡 Подтвердить: это Сквидвард в маске", callback_data="v3_fail_wrong_face")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="v3_step4_slow")]
+    ])
+    await callback.message.edit_text("📖 **Ветка 3 [Шаг 5/6]:** ИИ завершает сканирование лица. На экране четко прорисовывается знакомая зеленая антенна.", reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v3_fail_wrong_face")
+async def v3_fail_wrong_face(callback: types.CallbackQuery):
+    await callback.message.edit_text("❌ Ошибка идентификации! Ты обвинил не того, настоящий хакер стер логи. Провал!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "v3_win")
+async def v3_win(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET balance = balance + 750, story_status = 'completed' WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE users SET balance = balance + 800, story_status = 'completed' WHERE user_id = ?", (user_id,))
         await db.commit()
-    await callback.message.edit_text(
-        "🏆 **АБСОЛЮТНЫЙ ТРИУМФ!**\n\nЗаписи камер восстановлены, вина Планктона неоспорима!\n💰 Главная премия: **+750 коинов** начислена!",
-        reply_markup=get_back_keyboard(), parse_mode="Markdown"
-    )
+    await callback.message.edit_text("🏆 **Ветка 3 [ФИНАЛ]:** Железные доказательства собраны! Планктон изобличен благодаря хакерскому взлому.\n💰 Награда: **+800 коинов** зачислена!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 
 # Остальные игры и меню
@@ -564,10 +469,7 @@ async def spin_wheel(callback: types.CallbackQuery):
         await db.execute("UPDATE users SET balance = balance - 100 WHERE user_id = ?", (user_id,))
         await db.commit()
 
-    await callback.message.edit_text("🎡 Крутим...")
-    await asyncio.sleep(2)
     win = random.choices([0, 50, 100, 200, 350], weights=[35, 30, 20, 10, 5], k=1)[0]
-    
     async with aiosqlite.connect(DB_FILE) as db:
         if win > 0:
             await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (win, user_id))
@@ -575,9 +477,7 @@ async def spin_wheel(callback: types.CallbackQuery):
             res = f"🎉 Выигрыш: **+{win} коинов**!"
         else:
             res = "😢 Пусто."
-            
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]])
-    await callback.message.edit_text(res, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(res, reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "casino")
 async def casino(callback: types.CallbackQuery):
@@ -601,8 +501,8 @@ async def play_dice(callback: types.CallbackQuery):
 
     await callback.message.delete()
     dice = await callback.message.answer_dice(emoji="🎲")
-    val = dice.dice.value
     await asyncio.sleep(3)
+    val = dice.dice.value
 
     async with aiosqlite.connect(DB_FILE) as db:
         if val >= 4:
@@ -611,9 +511,7 @@ async def play_dice(callback: types.CallbackQuery):
             res = f"🎉 Выпало {val}! Выигрыш: **+100 коинов**!"
         else:
             res = f"😢 Выпало {val}. Проигрыш."
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]])
-    await callback.message.answer(res, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.answer(res, reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "daily_bonus")
 async def daily_bonus(callback: types.CallbackQuery):
@@ -654,7 +552,7 @@ async def back_menu(callback: types.CallbackQuery):
 async def main():
     await db_start()
     logging.basicConfig(level=logging.INFO)
-    print("Бот запущен!")
+    print("Бот успешно запущен со сверхмасштабным квестом!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
