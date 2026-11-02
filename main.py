@@ -8,13 +8,14 @@ from collections import defaultdict
 from html import escape
 
 import aiosqlite
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 TOKEN = os.getenv("BOT_TOKEN", "8660698360:AAEGVQen4KR8MXC3bJXZqDkAijZRZdttMfs")
 OWNER_ID = 7605961809
+CHANNEL_ID = -1003932211788  # канал для обязательной подписки (бот должен быть админом)
 
 # База лежит в /app/data (если папка есть на хостинге) — так она переживает пересборку
 DATA_DIR = "/app/data" if os.path.isdir("/app/data") else os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +41,8 @@ async def db_start():
                 last_work INTEGER DEFAULT 0,
                 last_bonus INTEGER DEFAULT 0,
                 story_status TEXT DEFAULT 'not_started',
-                referred_by INTEGER
+                referred_by INTEGER,
+                earned INTEGER DEFAULT 0
             )
         """)
         # Сохранение квеста: место, здоровье, предметы, улики, чекпоинт, концовки
@@ -56,30 +58,32 @@ async def db_start():
                 claimed TEXT
             )
         """)
+        await db.execute("CREATE TABLE IF NOT EXISTS work_cd (user_id INTEGER, job TEXT, last_ts INTEGER, PRIMARY KEY (user_id, job))")
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN earned INTEGER DEFAULT 0")
+        except Exception:
+            pass
         await db.commit()
 
 
-async def register_user(user_id: int, username: str, full_name: str, referrer_id: int = None):
+async def register_user(user_id: int, username: str, full_name: str):
     safe_name = "".join(c for c in full_name if c.isalnum() or c in " _-").strip() or "Без имени"
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            user = await cursor.fetchone()
-        if not user:
-            ref = referrer_id if referrer_id and referrer_id != user_id else None
-            await db.execute(
-                "INSERT INTO users (user_id, username, balance, jobs_done, last_work, last_bonus, story_status, referred_by) "
-                "VALUES (?, ?, 500, 0, 0, 0, 'not_started', ?)",
-                (user_id, safe_name, ref),
-            )
-            if ref:
-                await db.execute("UPDATE users SET balance = balance + 200 WHERE user_id = ?", (ref,))
-                await db.execute("UPDATE users SET balance = balance + 100 WHERE user_id = ?", (user_id,))
-            await db.commit()
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, balance, jobs_done, last_work, last_bonus, story_status, earned) "
+            "VALUES (?, ?, 500, 0, 0, 0, 'not_started', 0)",
+            (user_id, safe_name),
+        )
+        await db.commit()
 
 
-async def add_coins(user_id: int, amount: int):
+async def add_coins(user_id: int, amount: int, earn: bool = False):
+    """earn=True — сумма идёт в зачёт розыгрыша (работы и квест)."""
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        if earn:
+            await db.execute("UPDATE users SET balance = balance + ?, earned = earned + ? WHERE user_id = ?", (amount, amount, user_id))
+        else:
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
         await db.commit()
 
 
@@ -103,12 +107,98 @@ async def show(cb: types.CallbackQuery, text: str, kb=None):
 
 
 # ======================================================================
+#                      ПРОВЕРКА ПОДПИСКИ НА КАНАЛ
+# ======================================================================
+_sub_cache = {}
+_known_users = set()
+_channel_url = None
+
+
+async def get_channel_url():
+    global _channel_url
+    if _channel_url:
+        return _channel_url
+    try:
+        chat = await bot.get_chat(CHANNEL_ID)
+        if chat.username:
+            _channel_url = f"https://t.me/{chat.username}"
+        else:
+            _channel_url = chat.invite_link or await bot.export_chat_invite_link(CHANNEL_ID)
+    except Exception as e:
+        logging.warning("Не удалось получить ссылку на канал: %s", e)
+    return _channel_url
+
+
+async def is_subscribed(uid: int) -> bool:
+    if uid == OWNER_ID:
+        return True
+    ts = _sub_cache.get(uid)
+    if ts and time.time() - ts < 120:
+        return True
+    try:
+        m = await bot.get_chat_member(CHANNEL_ID, uid)
+    except Exception as e:
+        # Если бот не админ в канале, не блокируем всех, но пишем ошибку в лог
+        logging.error("Проверка подписки не удалась (бот админ в канале?): %s", e)
+        return True
+    ok = m.status in ("member", "administrator", "creator") or (m.status == "restricted" and getattr(m, "is_member", False))
+    if ok:
+        _sub_cache[uid] = time.time()
+    return ok
+
+
+async def ensure_user(user):
+    if user.id in _known_users:
+        return
+    await register_user(user.id, user.username or "NoName", user.first_name or "Игрок")
+    _known_users.add(user.id)
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+        if isinstance(event, types.CallbackQuery) and event.data == "check_sub":
+            return await handler(event, data)
+        if await is_subscribed(user.id):
+            await ensure_user(user)
+            return await handler(event, data)
+
+        url = await get_channel_url()
+        rows = []
+        if url:
+            rows.append([InlineKeyboardButton(text="📢 Подписаться на канал", url=url)])
+        rows.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")])
+        text = "🔒 Чтобы пользоваться ботом и участвовать в розыгрыше, подпишись на наш канал, а потом нажми «Я подписался»."
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        if isinstance(event, types.CallbackQuery):
+            await event.answer()
+            if event.message:
+                await event.message.answer(text, reply_markup=kb)
+        else:
+            await event.answer(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data == "check_sub")
+async def check_sub(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    _sub_cache.pop(uid, None)
+    if await is_subscribed(uid):
+        await ensure_user(callback.from_user)
+        await callback.answer("✅ Отлично!")
+        await show(callback, "Добро пожаловать! Главное меню:", get_main_menu())
+    else:
+        await callback.answer("❌ Подписка не найдена. Подпишись и нажми ещё раз.", show_alert=True)
+
+
+# ======================================================================
 #                              МЕНЮ
 # ======================================================================
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🍔 Повар в Красти Краб", callback_data="chef_work"),
+            InlineKeyboardButton(text="💼 Работа", callback_data="work_menu"),
             InlineKeyboardButton(text="📖 Эпичный квест", callback_data="story_start"),
         ],
         [
@@ -121,7 +211,7 @@ def get_main_menu():
         ],
         [
             InlineKeyboardButton(text="🎁 Ежедневный бонус", callback_data="daily_bonus"),
-            InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals"),
+            InlineKeyboardButton(text="🏆 Розыгрыш", callback_data="contest"),
         ],
         [
             InlineKeyboardButton(text="💰 Профиль", callback_data="balance"),
@@ -138,10 +228,8 @@ def get_back_keyboard():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    args = message.text.split()
-    referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
     name = message.from_user.first_name or "Игрок"
-    await register_user(message.from_user.id, message.from_user.username or "NoName", name, referrer_id)
+    await ensure_user(message.from_user)
     await message.answer(
         f"Здорово, <b>{escape(name)}</b>! 👋\n\nДобро пожаловать в Бикини Боттом. Выбирай занятие:",
         reply_markup=get_main_menu(),
@@ -165,22 +253,34 @@ async def process_balance(callback: types.CallbackQuery):
     await callback.answer()
     uid = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT balance, jobs_done FROM users WHERE user_id = ?", (uid,)) as cur:
+        async with db.execute("SELECT balance, jobs_done, earned FROM users WHERE user_id = ?", (uid,)) as cur:
             row = await cur.fetchone()
-    balance, jobs = row if row else (500, 0)
+    balance, jobs, earned = row if row else (500, 0, 0)
     q = await get_q(uid)
     endings = len(q["endings"]) if q else 0
     text = (
         f"👤 <b>Твой профиль:</b>\n\n💰 Баланс: <b>{balance} коинов</b>\n🛠 Смен: <b>{jobs}</b>\n"
+        f"🏆 Заработано для розыгрыша: <b>{earned}</b>\n"
         f"📖 Концовок квеста: <b>{endings}/{len(ENDINGS)}</b>"
     )
     await show(callback, text, get_back_keyboard())
 
 
 # ======================================================================
-#                              ПОВАР
+#                 РАБОТЫ (КД 4 ЧАСА НА КАЖДУЮ) И РОЗЫГРЫШ
 # ======================================================================
-chef_active_orders = {}
+WORK_CD = 4 * 3600  # кулдаун каждой работы, секунд
+
+JOBS = {
+    "chef": ("🍔 Повар", (250, 350)),
+    "courier": ("🛵 Курьер", (200, 300)),
+    "dishes": ("🧽 Мойщик посуды", (300, 450)),
+    "jelly": ("🪼 Ловец медуз", (350, 500)),
+    "cashier": ("💵 Кассир", (400, 600)),
+    "guard": ("🕵️ Охранник", (500, 700)),
+    "acc": ("🧮 Бухгалтер Крабса", (700, 1000)),
+}
+
 LAYERS = [
     ("bun_top", "🍞 Верхняя булочка"),
     ("meat", "🥩 Котлета"),
@@ -190,83 +290,408 @@ LAYERS = [
     ("bun_bot", "🍞 Нижняя булочка"),
 ]
 
-
-@dp.callback_query(F.data == "chef_work")
-async def chef_work_menu(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    now = int(time.time())
-    cooldown = 45
-    if uid != OWNER_ID:
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT last_work FROM users WHERE user_id = ?", (uid,)) as cur:
-                row = await cur.fetchone()
-        last_work = row[0] if row else 0
-        if now - last_work < cooldown:
-            await callback.answer(f"⏳ Кухня занята! Подожди {cooldown - (now - last_work)} сек.", show_alert=True)
-            return
-    await callback.answer()
-
-    recipe = random.sample(LAYERS, 3)
-    chef_active_orders[uid] = {"recipe": recipe, "step": 0}
-    recipe_text = " ➡️ ".join(item[1] for item in recipe)
-    await show(callback, f"🍔 <b>Повар в «Красти Краб»</b>\n\n📜 <b>Запомни рецепт:</b>\n👉 <code>{recipe_text}</code>\n\n⏱ У тебя <b>5 секунд</b>...")
-    await asyncio.sleep(5)
-    await show_chef_step(callback, uid)
+sessions = {}  # активные смены: user_id -> состояние
 
 
-async def show_chef_step(callback, uid):
-    order = chef_active_orders.get(uid)
-    if not order:
-        return
-    step, recipe = order["step"], order["recipe"]
-    correct = recipe[step][0]
-    options = LAYERS[:]
-    random.shuffle(options)
-    rows = [[InlineKeyboardButton(text=n, callback_data=f"chefstep_{'next' if k == correct else 'fail'}")] for k, n in options]
-    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="chef_cancel")])
-    await show(callback, f"🍳 <b>Сборка (шаг {step + 1} из {len(recipe)}):</b>\nКакой слой следующий?", InlineKeyboardMarkup(inline_keyboard=rows))
+def fmt_time(sec):
+    sec = int(sec)
+    h, m = sec // 3600, (sec % 3600) // 60
+    return f"{h} ч {m} мин" if h else f"{max(m, 1)} мин"
 
 
-@dp.callback_query(F.data == "chef_cancel")
-async def chef_cancel(callback: types.CallbackQuery):
-    chef_active_orders.pop(callback.from_user.id, None)
-    await callback.answer()
-    await show(callback, "Главное меню:", get_main_menu())
+def kb_rows(rows):
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@dp.callback_query(F.data.startswith("chefstep_"))
-async def chef_step_handler(callback: types.CallbackQuery):
-    action = callback.data.split("_")[1]
-    uid = callback.from_user.id
-    now = int(time.time())
-    order = chef_active_orders.get(uid)
-    if not order:
-        await callback.answer("❌ Заказ не найден.", show_alert=True)
-        return
-    await callback.answer()
+def btn(text, data):
+    return InlineKeyboardButton(text=text, callback_data=data)
 
-    if action == "fail":
-        del chef_active_orders[uid]
-        if uid != OWNER_ID:
-            async with aiosqlite.connect(DB_FILE) as db:
-                await db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (now, uid))
-                await db.commit()
-        await show(callback, "❌ Ошибка в слоях! Заказ испорчен.", get_back_keyboard())
-        return
 
-    order["step"] += 1
-    if order["step"] < len(order["recipe"]):
-        await show_chef_step(callback, uid)
-    else:
-        del chef_active_orders[uid]
-        reward = random.randint(150, 250)
+def make_opts(correct, deltas, n):
+    opts = {correct}
+    for d in random.sample(deltas, len(deltas)):
+        if len(opts) >= n:
+            break
+        if correct + d > 0:
+            opts.add(correct + d)
+    opts = list(opts)
+    random.shuffle(opts)
+    return opts
+
+
+async def cd_left(uid, job):
+    if uid == OWNER_ID:
+        return 0
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT last_ts FROM work_cd WHERE user_id = ? AND job = ?", (uid, job)) as cur:
+            row = await cur.fetchone()
+    last = row[0] if row else 0
+    return max(0, WORK_CD - (int(time.time()) - last))
+
+
+async def set_cd(uid, job):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("INSERT OR REPLACE INTO work_cd (user_id, job, last_ts) VALUES (?, ?, ?)", (uid, job, int(time.time())))
+        await db.commit()
+
+
+async def finish_job(cb, uid, s, ok, ok_text="", fail_text=""):
+    if sessions.get(uid) is not s:
+        return  # смена уже закончена (защита от двойной выплаты)
+    sessions.pop(uid, None)
+    kb = kb_rows([[btn("💼 К списку работ", "work_menu")], [btn("🏠 Меню", "back_menu")]])
+    if ok:
+        lo, hi = JOBS[s["job"]][1]
+        reward = random.randint(lo, hi)
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute(
-                "UPDATE users SET balance = balance + ?, jobs_done = jobs_done + 1, last_work = ? WHERE user_id = ?",
-                (reward, now, uid),
+                "UPDATE users SET balance = balance + ?, earned = earned + ?, jobs_done = jobs_done + 1 WHERE user_id = ?",
+                (reward, reward, uid),
             )
             await db.commit()
-        await show(callback, f"✅ Идеально! Награда: <b>+{reward} коинов</b> 🍔", get_back_keyboard())
+        await show(cb, f"✅ {ok_text}\n\n💰 Зарплата: <b>+{reward} коинов</b>\n⏳ Эта работа снова будет доступна через 4 часа.", kb)
+    else:
+        await show(cb, f"❌ {fail_text}\n\nСмена потеряна. ⏳ Эта работа снова будет доступна через 4 часа.", kb)
+
+
+# ---------------------------- меню работ ----------------------------
+@dp.callback_query(F.data == "work_menu")
+async def work_menu(callback: types.CallbackQuery):
+    await callback.answer()
+    uid = callback.from_user.id
+    sessions.pop(uid, None)
+    lines, rows = [], []
+    for key, (title, (lo, hi)) in JOBS.items():
+        left = await cd_left(uid, key)
+        status = "✅ доступна" if not left else f"⏳ {fmt_time(left)}"
+        lines.append(f"{title}: {lo}–{hi} 🪙 • {status}")
+        rows.append([btn(title if not left else f"{title} ⏳ {fmt_time(left)}", f"j:start:{key}")])
+    rows.append([btn("◀️ Назад в меню", "back_menu")])
+    text = (
+        "💼 <b>Работа</b>\n\nУ каждой работы свой таймер: следующая смена на той же работе будет через 4 часа. "
+        "Задания надо выполнять самому: они на память, реакцию и скорость, а время ограничено.\n\n" + "\n".join(lines)
+    )
+    await show(callback, text, kb_rows(rows))
+
+
+@dp.callback_query(F.data.startswith("j:start:"))
+async def job_start(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    key = callback.data.split(":")[2]
+    if key not in JOBS:
+        await callback.answer()
+        return
+    left = await cd_left(uid, key)
+    if left:
+        await callback.answer(f"⏳ Эта работа будет доступна через {fmt_time(left)}", show_alert=True)
+        return
+    await callback.answer()
+    await set_cd(uid, key)  # кулдаун идёт с начала смены, сбросить его выходом нельзя
+    await STARTERS[key](callback, uid)
+
+
+@dp.callback_query(F.data.startswith("j:a:"))
+async def job_answer(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    s = sessions.get(uid)
+    if not s:
+        await callback.answer("Смена уже закончилась.", show_alert=True)
+        return
+    await callback.answer()
+    await ANSWERS[s["job"]](callback, uid, s, callback.data[4:])
+
+
+# ---------------------------- 🍔 Повар (память) ----------------------------
+async def start_chef(cb, uid):
+    picked = random.sample(LAYERS, 4)
+    s = {"job": "chef", "recipe": [k for k, _ in picked], "step": 0}
+    sessions[uid] = s
+    names = " ➡️ ".join(n for _, n in picked)
+    await show(cb, f"🍔 <b>Повар в «Красти Краб»</b>\n\n📜 Запомни рецепт:\n<code>{names}</code>\n\n⏱ Показываю <b>4 секунды</b>...")
+    await asyncio.sleep(4)
+    if sessions.get(uid) is not s:
+        return
+    await chef_ask(cb, s)
+
+
+async def chef_ask(cb, s):
+    opts = LAYERS[:]
+    random.shuffle(opts)
+    rows = [[btn(n, f"j:a:{k}")] for k, n in opts]
+    await show(cb, f"🍳 <b>Сборка: слой {s['step'] + 1} из {len(s['recipe'])}</b>\nКакой слой дальше?", kb_rows(rows))
+
+
+async def chef_answer(cb, uid, s, arg):
+    if arg != s["recipe"][s["step"]]:
+        await finish_job(cb, uid, s, False, fail_text="Ошибка в слоях, заказ испорчен.")
+        return
+    s["step"] += 1
+    if s["step"] >= len(s["recipe"]):
+        await finish_job(cb, uid, s, True, ok_text="Идеальный крабсбургер!")
+    else:
+        await chef_ask(cb, s)
+
+
+# ---------------------------- 🛵 Курьер (реакция) ----------------------------
+async def start_courier(cb, uid):
+    s = {"job": "courier", "state": "wait"}
+    sessions[uid] = s
+    await show(cb, "🛵 <b>Курьер</b>\n\nЖди заказ у окошка. Нажми кнопку, когда появится 🍔. <b>Не раньше!</b>",
+               kb_rows([[btn("⏳ Жди...", "j:a:early")]]))
+    await asyncio.sleep(random.uniform(2.5, 7))
+    if sessions.get(uid) is not s:
+        return
+    s["state"] = "go"
+    await show(cb, "🍔 <b>ЗАКАЗ ГОТОВ!</b> Хватай скорее!", kb_rows([[btn("🍔 ЗАБРАТЬ!", "j:a:go")]]))
+    s["t"] = time.time()
+
+
+async def courier_answer(cb, uid, s, arg):
+    if arg == "early" or s.get("state") != "go":
+        await finish_job(cb, uid, s, False, fail_text="Ты нажал слишком рано, заказ ещё не был готов.")
+    elif time.time() - s["t"] > 3.0:
+        await finish_job(cb, uid, s, False, fail_text="Слишком медленно, клиент ушёл.")
+    else:
+        await finish_job(cb, uid, s, True, ok_text="Заказ доставлен вовремя!")
+
+
+# ---------------------------- 🧽 Мойщик посуды (последовательность) ----------------------------
+DISH_POOL = ["🍽", "🥄", "🍴", "🧂", "🥢", "🫖"]
+
+
+async def start_dishes(cb, uid):
+    seq = [random.randrange(6) for _ in range(5)]
+    s = {"job": "dishes", "seq": seq, "pos": 0}
+    sessions[uid] = s
+    shown = " ".join(DISH_POOL[i] for i in seq)
+    await show(cb, f"🧽 <b>Мойщик посуды</b>\n\nЗапомни порядок:\n\n{shown}\n\n⏱ Показываю <b>4 секунды</b>...")
+    await asyncio.sleep(4)
+    if sessions.get(uid) is not s:
+        return
+    await dishes_ask(cb, s)
+
+
+async def dishes_ask(cb, s):
+    done = " ".join(DISH_POOL[i] for i in s["seq"][:s["pos"]]) or "—"
+    rows = [[btn(DISH_POOL[i], f"j:a:{i}") for i in (r * 2, r * 2 + 1)] for r in range(3)]
+    await show(cb, f"🧽 Повтори порядок ({s['pos']} из {len(s['seq'])}):\n\n{done}", kb_rows(rows))
+
+
+async def dishes_answer(cb, uid, s, arg):
+    if int(arg) != s["seq"][s["pos"]]:
+        await finish_job(cb, uid, s, False, fail_text="Перепутал порядок, посуда разбита.")
+        return
+    s["pos"] += 1
+    if s["pos"] >= len(s["seq"]):
+        await finish_job(cb, uid, s, True, ok_text="Вся посуда сверкает!")
+    else:
+        await dishes_ask(cb, s)
+
+
+# ---------------------------- 🪼 Ловец медуз (тайминг) ----------------------------
+JELLY_CELLS = 8
+
+
+def jelly_render(s):
+    zone = (s["target"], s["target"] + 1)
+    cells = []
+    for i in range(JELLY_CELLS):
+        if i == s["pos"]:
+            cells.append("🪼")
+        elif i in zone:
+            cells.append("🥅")
+        else:
+            cells.append("🌊")
+    return " ".join(cells)
+
+
+async def start_jelly(cb, uid):
+    s = {"job": "jelly", "pos": 0, "target": random.randint(2, 5)}
+    sessions[uid] = s
+    kb = kb_rows([[btn("🥅 ЛОВИ!", "j:a:catch")]])
+    for pos in range(JELLY_CELLS):
+        s["pos"] = pos
+        await show(cb, f"🪼 <b>Ловец медуз</b>\n\nЖми «ЛОВИ!», когда 🪼 заплывёт в 🥅 (две клетки сачка).\n\n{jelly_render(s)}", kb)
+        await asyncio.sleep(1.5)
+        if sessions.get(uid) is not s:
+            return
+    await finish_job(cb, uid, s, False, fail_text="Медуза уплыла.")
+
+
+async def jelly_answer(cb, uid, s, arg):
+    if s["target"] <= s["pos"] <= s["target"] + 1:
+        await finish_job(cb, uid, s, True, ok_text="Медуза в сачке!")
+    else:
+        await finish_job(cb, uid, s, False, fail_text="Сачок пуст: ты нажал не вовремя.")
+
+
+# ---------------------------- 💵 Кассир (быстрый счёт) ----------------------------
+MENU_ITEMS = [("🍔 Крабсбургер", 35), ("🍟 Картошка", 20), ("🥤 Кола", 15), ("🥗 Салат", 25), ("🍦 Мороженое", 18), ("🍕 Кельп-пицца", 40)]
+
+
+async def cashier_show(cb, s):
+    items = random.sample(MENU_ITEMS, 3)
+    total = sum(p for _, p in items)
+    paid = (total // 50 + 1) * 50
+    change = paid - total
+    s["change"] = change
+    s["opts"] = make_opts(change, [-10, -5, -3, 3, 5, 10], 3)
+    s["deadline"] = time.time() + 12
+    order = "\n".join(f"{n} — {p}" for n, p in items)
+    rows = [[btn(f"{v} коинов", f"j:a:{i}")] for i, v in enumerate(s["opts"])]
+    await show(cb, f"💵 <b>Кассир — клиент {s['round'] + 1} из 2</b>\n\n{order}\n\nКлиент даёт <b>{paid}</b>. Сколько сдачи? У тебя 12 секунд.", kb_rows(rows))
+
+
+async def start_cashier(cb, uid):
+    s = {"job": "cashier", "round": 0}
+    sessions[uid] = s
+    await cashier_show(cb, s)
+
+
+async def cashier_answer(cb, uid, s, arg):
+    if time.time() > s["deadline"] + 1.5:
+        await finish_job(cb, uid, s, False, fail_text="Клиент не дождался и ушёл.")
+    elif s["opts"][int(arg)] != s["change"]:
+        await finish_job(cb, uid, s, False, fail_text="Неверная сдача, клиент возмущён.")
+    else:
+        s["round"] += 1
+        if s["round"] >= 2:
+            await finish_job(cb, uid, s, True, ok_text="Оба клиента довольны!")
+        else:
+            await cashier_show(cb, s)
+
+
+# ---------------------------- 🕵️ Охранник (внимание) ----------------------------
+GUARD_PAIRS = [("🦀", "🦞"), ("😀", "😃"), ("🐟", "🐠"), ("🔴", "🟠"), ("🐙", "🦑"), ("🌕", "🌝")]
+
+
+async def guard_show(cb, s):
+    a, b = random.choice(GUARD_PAIRS)
+    if random.random() < 0.5:
+        a, b = b, a
+    odd = random.randrange(16)
+    s["odd"] = odd
+    s["deadline"] = time.time() + 8
+    rows = [[btn(b if r * 4 + c == odd else a, f"j:a:{r * 4 + c}") for c in range(4)] for r in range(4)]
+    await show(cb, f"🕵️ <b>Охранник — обход {s['round'] + 1} из 3</b>\n\nНайди лишнего! У тебя 8 секунд.", kb_rows(rows))
+
+
+async def start_guard(cb, uid):
+    s = {"job": "guard", "round": 0}
+    sessions[uid] = s
+    await guard_show(cb, s)
+
+
+async def guard_answer(cb, uid, s, arg):
+    if time.time() > s["deadline"] + 1.5:
+        await finish_job(cb, uid, s, False, fail_text="Время вышло, нарушитель скрылся.")
+    elif int(arg) != s["odd"]:
+        await finish_job(cb, uid, s, False, fail_text="Не тот! Сработала тревога.")
+    else:
+        s["round"] += 1
+        if s["round"] >= 3:
+            await finish_job(cb, uid, s, True, ok_text="Все нарушители пойманы!")
+        else:
+            await guard_show(cb, s)
+
+
+# ---------------------------- 🧮 Бухгалтер Крабса (память + счёт) ----------------------------
+async def start_acc(cb, uid):
+    nums = [random.randint(12, 59) for _ in range(4)]
+    s = {"job": "acc", "total": sum(nums)}
+    sessions[uid] = s
+    shown = "  •  ".join(str(n) for n in nums)
+    await show(cb, f"🧮 <b>Бухгалтер Крабса</b>\n\nЗапомни числа:\n\n<b>{shown}</b>\n\n⏱ Показываю <b>5 секунд</b>, потом спрошу сумму.")
+    await asyncio.sleep(5)
+    if sessions.get(uid) is not s:
+        return
+    s["opts"] = make_opts(s["total"], [-1, 1, -2, 2, -10, 10, -11, 11], 4)
+    s["deadline"] = time.time() + 20
+    rows = [[btn(str(s["opts"][r * 2 + c]), f"j:a:{r * 2 + c}") for c in range(2)] for r in range(2)]
+    await show(cb, "🧮 Чему равна сумма всех четырёх чисел? У тебя 20 секунд.", kb_rows(rows))
+
+
+async def acc_answer(cb, uid, s, arg):
+    if time.time() > s["deadline"] + 1.5:
+        await finish_job(cb, uid, s, False, fail_text="Время вышло, Крабс недоволен.")
+    elif s["opts"][int(arg)] != s["total"]:
+        await finish_job(cb, uid, s, False, fail_text="Ошибка в отчёте! Крабс в ярости.")
+    else:
+        await finish_job(cb, uid, s, True, ok_text="Отчёт сошёлся до копейки!")
+
+
+STARTERS = {"chef": start_chef, "courier": start_courier, "dishes": start_dishes, "jelly": start_jelly,
+            "cashier": start_cashier, "guard": start_guard, "acc": start_acc}
+ANSWERS = {"chef": chef_answer, "courier": courier_answer, "dishes": dishes_answer, "jelly": jelly_answer,
+           "cashier": cashier_answer, "guard": guard_answer, "acc": acc_answer}
+
+
+# ---------------------------- 🏆 Розыгрыш ----------------------------
+async def contest_text(uid):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            "SELECT username, earned FROM users WHERE user_id != ? AND earned > 0 ORDER BY earned DESC LIMIT 10", (OWNER_ID,)
+        ) as cur:
+            rows = await cur.fetchall()
+        async with db.execute("SELECT earned FROM users WHERE user_id = ?", (uid,)) as cur:
+            me = await cur.fetchone()
+        mine = me[0] if me else 0
+        async with db.execute("SELECT COUNT(*) FROM users WHERE user_id != ? AND earned > ?", (OWNER_ID, mine)) as cur:
+            ahead = (await cur.fetchone())[0]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (name, earned) in enumerate(rows):
+        mark = medals[i] if i < 3 else f"{i + 1}."
+        lines.append(f"{mark} {escape(str(name))} — <b>{earned}</b>")
+    top_text = "\n".join(lines) or "Пока никто не заработал. Будь первым!"
+    text = (
+        "🏆 <b>Розыгрыш</b>\n\nПобеждают <b>3 игрока</b>, которые заработают больше всех. "
+        "В зачёт идут только зарплата с работ и награды квеста. Казино, колесо и бонусы не считаются.\n\n"
+        f"<b>Топ-10:</b>\n{top_text}"
+    )
+    if uid != OWNER_ID:
+        place = f"{ahead + 1} место" if mine > 0 else "ты пока вне рейтинга"
+        text += f"\n\n👤 Ты: <b>{mine}</b> ({place})"
+    return text
+
+
+@dp.callback_query(F.data == "contest")
+async def contest_cb(callback: types.CallbackQuery):
+    await callback.answer()
+    kb = kb_rows([[btn("💼 К работам", "work_menu")], [btn("◀️ Назад в меню", "back_menu")]])
+    await show(callback, await contest_text(callback.from_user.id), kb)
+
+
+@dp.message(Command("contest"))
+async def contest_cmd(message: types.Message):
+    await message.answer(await contest_text(message.from_user.id), parse_mode="HTML")
+
+
+@dp.message(Command("contest_winners"))
+async def contest_winners(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            "SELECT user_id, username, earned FROM users WHERE user_id != ? AND earned > 0 ORDER BY earned DESC LIMIT 3", (OWNER_ID,)
+        ) as cur:
+            rows = await cur.fetchall()
+    if not rows:
+        await message.answer("Пока нет участников.")
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f"{medals[i]} <a href=\"tg://user?id={uid}\">{escape(str(name))}</a> — {earned} (id <code>{uid}</code>)" for i, (uid, name, earned) in enumerate(rows)]
+    await message.answer("🏆 <b>Победители:</b>\n\n" + "\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("contest_reset"))
+async def contest_reset(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET earned = 0")
+        await db.commit()
+    await message.answer("✅ Счётчик розыгрыша обнулён. Можно запускать новый розыгрыш.")
 
 
 # ======================================================================
@@ -787,7 +1212,7 @@ async def apply_node(uid, q, nid):
     coins = n.get("coins", 0)
     if coins and nid not in q["claimed"]:
         q["claimed"].append(nid)
-        await add_coins(uid, coins)
+        await add_coins(uid, coins, earn=True)
         notes.append(f"💰 +{coins} коинов")
 
     if n.get("end"):
@@ -796,7 +1221,7 @@ async def apply_node(uid, q, nid):
             q["endings"].append(eid)
             reward = n.get("reward", 0)
             if reward:
-                await add_coins(uid, reward)
+                await add_coins(uid, reward, earn=True)
                 notes.append(f"🏆 Награда за новую концовку: +{reward} коинов")
             notes.append("✨ Новая концовка открыта!")
             if reward:
@@ -1125,7 +1550,7 @@ async def rps_play(callback: types.CallbackQuery):
 
 
 # ======================================================================
-#                      БОНУС, РЕФЕРАЛЫ, ТОП
+#                      БОНУС, ТОП
 # ======================================================================
 @dp.callback_query(F.data == "daily_bonus")
 async def daily_bonus(callback: types.CallbackQuery):
@@ -1143,19 +1568,6 @@ async def daily_bonus(callback: types.CallbackQuery):
         await db.commit()
     await callback.answer()
     await show(callback, "🎁 Бонус получен: <b>+250 коинов</b>!", get_back_keyboard())
-
-
-@dp.callback_query(F.data == "referrals")
-async def referrals(callback: types.CallbackQuery):
-    await callback.answer()
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start={callback.from_user.id}"
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (callback.from_user.id,)) as cur:
-            row = await cur.fetchone()
-    count = row[0] if row else 0
-    await show(callback, f"👥 <b>Рефералы</b>\n\nТвоя ссылка:\n<code>{link}</code>\n\nПриглашено: {count}\n"
-                         f"За каждого друга: +200 тебе и +100 ему.", get_back_keyboard())
 
 
 @dp.callback_query(F.data == "top")
@@ -1180,6 +1592,8 @@ async def main():
         for ch in node["c"]:
             assert ch["to"] in NODES, f"Квест: узел '{nid}' ведёт в несуществующий '{ch['to']}'"
     await db_start()
+    dp.message.outer_middleware(SubscriptionMiddleware())
+    dp.callback_query.outer_middleware(SubscriptionMiddleware())
     print(f"Бот запущен. База: {DB_FILE}. Узлов в квесте: {len(NODES)}")
     await dp.start_polling(bot)
 
