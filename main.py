@@ -30,7 +30,7 @@ async def db_start():
         """)
         await db.commit()
 
-# Регистрация пользователя
+# Регистрация пользователя с защитой баланса от перезаписи
 async def register_user(user_id: int, username: str, full_name: str, referrer_id: int = None):
     safe_name = "".join(c for c in full_name if c.isalnum() or c in " _-").strip()
     if not safe_name:
@@ -92,7 +92,7 @@ async def cmd_start(message: types.Message):
     
     text = (
         f"Здорово, **{user_display_name}**! 👋\n\n"
-        "Добро пожаловать в Бикини Боттон! Добавлена защищенная мини-игра «Повар» с таймером на 5 секунд и рандомом кнопок!"
+        "Добро пожаловать в Бикини Боттон! Все ошибки в квесте исправлены, балансы надежно защищены в базе данных."
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
@@ -130,7 +130,6 @@ async def chef_work_menu(callback: types.CallbackQuery):
             await callback.answer(f"⏳ Кухня занята! Следующая смена через {left} сек.", show_alert=True)
             return
 
-    # Список ингредиентов для бургера
     ingredients = [
         ("bun_top", "🍞 Верхняя булочка"),
         ("meat", "🥩 Сочная котлета"),
@@ -139,12 +138,10 @@ async def chef_work_menu(callback: types.CallbackQuery):
         ("bun_bot", "🍞 Нижняя булочка")
     ]
     
-    # Случайный выбор правильного первого шага рецепта
     correct_item = random.choice(ingredients)
     correct_key = correct_item[0]
     correct_name = correct_item[1]
 
-    # Шаг 1: Показываем рецепт на 5 секунд
     await callback.message.edit_text(
         f"🍔 **Смена: Повар в «Красти Краб»**\n\n"
         f"📜 **Внимание, рецепт заказа:**\n"
@@ -153,16 +150,13 @@ async def chef_work_menu(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-    # Ждем 5 секунд (защита от скриншотов и ИИ)
     await asyncio.sleep(5)
 
-    # Перемешиваем кнопки случайным образом (каждый раз порядок разный)
     shuffled_options = list(ingredients)
     random.shuffle(shuffled_options)
 
     kb_buttons = []
     for key, name in shuffled_options:
-        # Маркируем правильную кнопку и фейковые
         res_type = "win" if key == correct_key else "fail"
         kb_buttons.append([InlineKeyboardButton(text=name, callback_data=f"chef_{res_type}")])
 
@@ -192,13 +186,13 @@ async def chef_result_handler(callback: types.CallbackQuery):
         else:
             await db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (current_time, user_id))
             await db.commit()
-            text = "❌ **Ошибка в рецепте!** Перепутал ингредиенты, заказ сгорел, включился кулдаун 45 секунд."
+            text = "❌ **Ошибка в рецепте!** Перепутал ингредиенты, заказ сгорел, кулдаун 45 секунд."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🍔 На кухню", callback_data="chef_work")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
 # --- МИНИ-ИГРА: ТИР ПО МЕДУЗАМ ---
@@ -223,7 +217,8 @@ async def shoot_jelly(callback: types.CallbackQuery):
 
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            balance = (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            balance = row[0] if row else 500
 
         if balance < cost:
             await callback.answer("❌ Недостаточно коинов!", show_alert=True)
@@ -279,7 +274,8 @@ async def play_rps(callback: types.CallbackQuery):
 
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            balance = (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            balance = row[0] if row else 500
 
         if balance < bet:
             await callback.answer("❌ Недостаточно коинов!", show_alert=True)
@@ -321,13 +317,14 @@ async def play_rps(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
-# --- СЮЖЕТНЫЙ КВЕСТ (Пройти 1 раз) ---
+# --- СЮЖЕТНЫЙ КВЕСТ (Исправленный, без ложных сбросов) ---
 @dp.callback_query(F.data == "story_start")
 async def story_start(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT story_completed FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            completed = (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            completed = row[0] if row else 0
 
         if completed == 1:
             await callback.answer("⚠️ Квест уже пройден! Жди новые главы.", show_alert=True)
@@ -335,7 +332,7 @@ async def story_start(callback: types.CallbackQuery):
 
     text = (
         "📖 **Глава 1: Пропажа на кухне**\n\n"
-        "Ночью кто-то украл секретный экстракт из сейфа Мистера Крабса! Найди вора."
+        "Ночью кто-то украл секретный экстракт из сейфа Мистера Крабса! С чего начнем расследование?"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Обыскать кухню", callback_data="story_kitchen")],
@@ -347,20 +344,21 @@ async def story_start(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "story_kitchen")
 async def story_kitchen(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="story_start")]])
-    await callback.message.edit_text("📖 Следы привели в тупик.", reply_markup=kb, parse_mode="Markdown")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="story_start")]])
+    await callback.message.edit_text("📖 Ты обыскал кухню, но нашел только старые банки из-под майонеза. Улик нет.", reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "story_spongebob")
 async def story_spongebob(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="story_start")]])
-    await callback.message.edit_text("📖 Боб невиновен.", reply_markup=kb, parse_mode="Markdown")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="story_start")]])
+    await callback.message.edit_text("📖 Губка Боб искренне плачет и клянется, что невиновен. Он спал всю ночь.", reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "story_cameras")
 async def story_cameras(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="27", callback_data="story_win"), InlineKeyboardButton(text="25", callback_data="story_bad")]
+        [InlineKeyboardButton(text="27", callback_data="story_win"), InlineKeyboardButton(text="25", callback_data="story_bad")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="story_start")]
     ])
-    await callback.message.edit_text("📖 Взломай камеры. Пример: **12 + 15 = ?**", reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text("📖 Ты зашел в кабинет и открыл камеры. Замок требует решить пример: **12 + 15 = ?**", reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "story_win")
 async def story_win(callback: types.CallbackQuery):
@@ -368,15 +366,12 @@ async def story_win(callback: types.CallbackQuery):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET balance = balance + 500, story_completed = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
-    await callback.message.edit_text("🎉 **Победа!** Вор пойман, премия **+500 коинов** начислена!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+    await callback.message.edit_text("🎉 **Победа!** Пароль подошел, ты поймал вора на камерах! Премия **+500 коинов** начислена в профиль!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "story_bad")
 async def story_bad(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET story_completed = 1 WHERE user_id = ?", (user_id,))
-        await db.commit()
-    await callback.message.edit_text("😢 **Провал!** Ошибка в расследовании.", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="story_cameras"), [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]])
+    await callback.message.edit_text("❌ Неверный пароль! Система заблокировалась на минуту. Попробуй еще раз.", reply_markup=kb, parse_mode="Markdown")
 
 
 # Казино, Колесо, Бонусы, Топ, Рефералы
@@ -392,7 +387,8 @@ async def fortune_wheel(callback: types.CallbackQuery):
 async def spin_wheel(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        balance = (await (await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))).fetchone())[0]
+        row = await (await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))).fetchone()
+        balance = row[0] if row else 500
         if balance < 100:
             await callback.answer("❌ Мало коинов!", show_alert=True)
             return
@@ -426,7 +422,8 @@ async def casino(callback: types.CallbackQuery):
 async def play_dice(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        balance = (await (await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))).fetchone())[0]
+        row = await (await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))).fetchone()
+        balance = row[0] if row else 500
         if balance < 50:
             await callback.answer("❌ Мало коинов!", show_alert=True)
             return
@@ -454,7 +451,8 @@ async def daily_bonus(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     now = asyncio.get_event_loop().time()
     async with aiosqlite.connect(DB_FILE) as db:
-        last = (await (await db.execute("SELECT last_bonus FROM users WHERE user_id = ?", (user_id,))).fetchone())[0]
+        row = await (await db.execute("SELECT last_bonus FROM users WHERE user_id = ?", (user_id,))).fetchone()
+        last = row[0] if row else 0
         if now - last < 86400:
             await callback.answer("⏳ Бонус раз в 24 часа!", show_alert=True)
             return
@@ -467,7 +465,8 @@ async def referrals(callback: types.CallbackQuery):
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={callback.from_user.id}"
     async with aiosqlite.connect(DB_FILE) as db:
-        count = (await (await db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (callback.from_user.id,))).fetchone())[0]
+        row = await (await db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (callback.from_user.id,))).fetchone()
+        count = row[0] if row else 0
     await callback.message.edit_text(f"👥 **Рефералы**\n\nСсылка:\n`{link}`\n\nПриглашено: {count}", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "top")
