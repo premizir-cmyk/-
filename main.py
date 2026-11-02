@@ -92,7 +92,7 @@ async def cmd_start(message: types.Message):
     
     text = (
         f"Здорово, **{user_display_name}**! 👋\n\n"
-        "Добро пожаловать в Бикини Боттон! Все ошибки в квесте исправлены, балансы надежно защищены в базе данных."
+        "Добро пожаловать в Бикини Боттон! Ошибка исправлена, бот успешно запущен и работает."
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
@@ -370,8 +370,11 @@ async def story_win(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "story_bad")
 async def story_bad(callback: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="story_cameras"), [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]])
-    await callback.message.edit_text("❌ Неверный пароль! Система заблокировалась на минуту. Попробуй еще раз.", reply_markup=kb, parse_mode="Markdown")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="story_cameras")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
+    ])
+    await callback.message.edit_text("❌ Неверный пароль! Система заблокировалась. Попробуй еще раз.", reply_markup=kb, parse_mode="Markdown")
 
 
 # Казино, Колесо, Бонусы, Топ, Рефералы
@@ -485,7 +488,7 @@ async def back_menu(callback: types.CallbackQuery):
 async def main():
     await db_start()
     logging.basicConfig(level=logging.INFO)
-    print("Бот запущен!")
+    print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
