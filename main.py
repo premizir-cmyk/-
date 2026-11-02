@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 TOKEN = '8660698360:AAEGVQen4KR8MXC3bJXZqDkAijZRZdttMfs'
-OWNER_ID = 7605961809  # Твой ID (без КД и с полным доступом)
+OWNER_ID = 7605961809  # Твой ID без КД
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -93,7 +93,7 @@ async def cmd_start(message: types.Message):
     
     text = (
         f"Здорово, **{user_display_name}**! 👋\n\n"
-        "Добро пожаловать в Бикини Боттон! Ошибка зависания в квесте полностью исправлена."
+        "Бот полностью перезапущен и готов к работе. Ошибки обработки кнопок устранены!"
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
@@ -193,8 +193,8 @@ async def show_chef_step(message, user_id):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons),
             parse_mode="HTML"
         )
-    except:
-        pass
+    except Exception as e:
+        print(f"Error in show_chef_step: {e}")
 
 @dp.callback_query(F.data.startswith("chefstep_"))
 async def chef_step_handler(callback: types.CallbackQuery):
@@ -358,14 +358,11 @@ async def story_start(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="📹 Ветка 3: Взломать систему камер", callback_data="cam_start")],
         [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
     ])
-    try:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    except:
-        await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
 # ==========================================
-# ВЕТКА 1: ИЗУЧЕНИЕ УЛИК (Исправлена и развернута)
+# ВЕТКА 1: ИЗУЧЕНИЕ УЛИК
 # ==========================================
 @dp.callback_query(F.data == "clues_start")
 async def clues_start(callback: types.CallbackQuery):
@@ -381,10 +378,7 @@ async def clues_start(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="🔬 Провести анализ улик в лаборатории", callback_data="clues_lab")],
         [InlineKeyboardButton(text="◀️ На главную развилку квеста", callback_data="story_start")]
     ])
-    try:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    except:
-        await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "clues_interrogate_all")
 async def clues_interrogate_all(callback: types.CallbackQuery):
