@@ -13,7 +13,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 DB_FILE = "database.db"
 
-# Инициализация базы данных с защитой от сброса балансов
+# Инициализация базы данных
 async def db_start():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -30,7 +30,7 @@ async def db_start():
         """)
         await db.commit()
 
-# Безопасная регистрация (гарантирует, что существующие балансы не затрутся)
+# Безопасная регистрация
 async def register_user(user_id: int, username: str, full_name: str, referrer_id: int = None):
     safe_name = "".join(c for c in full_name if c.isalnum() or c in " _-").strip()
     if not safe_name:
@@ -92,23 +92,24 @@ async def cmd_start(message: types.Message):
     
     text = (
         f"Здорово, **{user_display_name}**! 👋\n\n"
-        "Добро пожаловать в Бикини Боттон! Базы данных защищены от сбросов, квест полностью переписан в масштабную детективную историю с жесткими развилками!"
+        "Добро пожаловать в Бикини Боттон! Все начисления за квесты исправлены, а сюжетные ветки стали глубокими и многоэтапными."
     )
     await message.answer(text, reply_markup=get_main_menu(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "balance")
 async def process_balance(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT balance, jobs_done, story_status FROM users WHERE user_id = ?", (callback.from_user.id,)) as cursor:
+        async with db.execute("SELECT balance, jobs_done, story_status FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             balance, jobs, status = row if row else (500, 0, 'not_started')
 
     if status == 'completed':
-        story_text = "✅ Успешно пройден"
+        story_text = "✅ Пройден (Награда получена)"
     elif status == 'failed':
         story_text = "❌ Провален"
     else:
-        story_text = "⏳ В процессе / Не начат"
+        story_text = "⏳ Активен / Не начат"
 
     text = (
         f"👤 **Твой профиль:**\n\n"
@@ -338,7 +339,7 @@ async def play_rps(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
-# --- МАСШТАБНЫЙ МНОГОУРОВНЕВЫЙ КВЕСТ С ЖЕСТКИМИ РАЗВИЛКАМИ ---
+# --- МАСШТАБНЫЙ МНОГОУРОВНЕВЫЙ КВЕСТ С ГЛУБОКИМИ ВЕТВЯМИ ---
 @dp.callback_query(F.data == "story_start")
 async def story_start(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -350,162 +351,153 @@ async def story_start(callback: types.CallbackQuery):
             await callback.answer("⚠️ Ты уже успешно завершил этот квест!", show_alert=True)
             return
         elif status == 'failed':
-            await callback.answer("❌ Твое расследование было провалено. Перепройти эту главу пока нельзя!", show_alert=True)
+            await callback.answer("❌ Твое расследование было провалено. Перепройти нельзя!", show_alert=True)
             return
 
-        # Фиксируем, что квест начат
         await db.execute("UPDATE users SET story_status = 'in_progress' WHERE user_id = ?", (user_id,))
         await db.commit()
 
     text = (
         "📖 **Глава 1: Ночной грабеж в «Красти Краб»**\n\n"
-        "Утро выдалось кошмарным. Сейф взломан, секретный экстракт украден, а Мистер Крабс грозится выгнать всех на мороз. "
-        "У тебя есть выбор, с чего начать расследование, но помни: **ошибка приведет к полному провалу дела без права переигрывания этой ветки!**\n\n"
-        "Куда направишься первым делом?"
+        "Сейф взломан, секретный экстракт украден! С чего начнешь расследование? Выбирай с умом — ошибка в любой ветке приведет к полному провалу дела:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Обыскать служебный мусорный бак", callback_data="branch_trash")],
-        [InlineKeyboardButton(text="🕵️‍♂️ Провести допрос Губки Боба", callback_data="branch_bob")],
-        [InlineKeyboardButton(text="📹 Взломать систему видеонаблюдения", callback_data="branch_cam")],
+        [InlineKeyboardButton(text="🔍 Ветка 1: Обыскать служебную мусорку", callback_data="trash_step1")],
+        [InlineKeyboardButton(text="🕵️‍♂️ Ветка 2: Допросить Губку Боба", callback_data="bob_step1")],
+        [InlineKeyboardButton(text="📹 Ветка 3: Взломать систему камер", callback_data="cam_step1")],
         [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-# --- ВЕТКА 1: Мусорка (Тупиковая / Ложная) ---
-@dp.callback_query(F.data == "branch_trash")
-async def branch_trash(callback: types.CallbackQuery):
+# --- ВЕТКА 1: МУСОРКА (Многоэтапный глубокий путь) ---
+@dp.callback_query(F.data == "trash_step1")
+async def trash_step1(callback: types.CallbackQuery):
     text = (
-        "📖 **Расследование у мусорных баков**\n\n"
-        "Ты тщательно перебираешь отходы за рестораном. На дне бака ты находишь обертку от водорослей с пометкой «Чам Баккет».\n"
-        "Ты решаешь, что вор — Планктон, и сразу бежишь штурмовать его ресторан без улик...\n\n"
-        "⚠️ Охранная система «Чам Баккет» бьет тебя током, а Планктон вызывает полицию Бикини Боттон за клевету!"
+        "📖 **Ветка 1: Шаг 1 — Мусорные баки**\n\n"
+        "Ты роешься в отходах и находишь обертку от батончика из «Чам Баккет» и чек на покупку маскировки. Куда поведем след дальше?"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💀 Принять поражение", callback_data="story_fail")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏃‍♂️ Бежать напрямую к Чам Баккет", callback_data="trash_fail")],
+        [InlineKeyboardButton(text="🕵️‍♂️ Выследить поставщика чеков на рынке", callback_data="trash_step2")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
+    ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-# --- ВЕТКА 2: Губка Боб (Средняя / Разветвленная) ---
-@dp.callback_query(F.data == "branch_bob")
-async def branch_bob(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "trash_fail")
+async def trash_fail(callback: types.CallbackQuery):
+    text = "📖 Ты ворвался в Чам Баккет без улик, тебя выкинули охраной.\n\n❌ **Квест провален!**"
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET story_status = 'failed' WHERE user_id = ?", (callback.from_user.id,))
+        await db.commit()
+    await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "trash_step2")
+async def trash_step2(callback: types.CallbackQuery):
     text = (
-        "📖 **Допрос Губки Боба**\n\n"
-        "Ты застаешь Боба за плачем. Он клянется, что спал, но вспоминает деталь: ночью кто-то стучал в кухонное окно металлическим предметом и пахло машинным маслом.\n"
-        "Как поступишь с этой информацией?"
+        "📖 **Ветка 1: Финал — Рынок Бикини Боттон**\n\n"
+        "Ты нашел продавца масок! Он сдает покупателя: это был робот-помощник Планктона. Ты перехватываешь его на выходе!\n\n"
+        "🏆 **Победа!** Экстракт возвращен."
     )
-    kb = InlineKeyboardMarkup(inline_keyword=[
-        [InlineKeyboardButton(text="🗣 Наорать на Боба и обвинить в краже", callback_data="bob_fail")],
-        [InlineKeyboardButton(text="🤝 Объединить силы и устроить засаду на складе", callback_data="bob_success")],
-        [InlineKeyboardButton(text="◀️ Назад к выбору", callback_data="story_start")]
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET balance = balance + 500, story_status = 'completed' WHERE user_id = ?", (user_id,))
+        await db.commit()
+    await callback.message.edit_text(text + "\n\n🎁 Награда: **+500 коинов** зачислено!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+# --- ВЕТКА 2: ГУБКА БОБ (Многоэтапный глубокий путь) ---
+@dp.callback_query(F.data == "bob_step1")
+async def bob_step1(callback: types.CallbackQuery):
+    text = (
+        "📖 **Ветка 2: Шаг 1 — Допрос Губки Боба**\n\n"
+        "Боб плачет и говорит, что слышал металлический скрежет под окном кухни ночью. Что ответишь ему?"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Обвинить Боба в соучастии", callback_data="bob_fail")],
+        [InlineKeyboardButton(text="🤝 Предложить ему собрать ловушку вместе", callback_data="bob_step2")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "bob_fail")
 async def bob_fail(callback: types.CallbackQuery):
-    text = "📖 Ты несправедливо обвинил лучшего повара. Боб уволился в слезах, Мистер Крабс уволил и тебя за дебош.\n\n❌ **Квест провален!**"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]])
+    text = "📖 Боб обиделся и уволился. Расследование зашло в тупик.\n\n❌ **Квест провален!**"
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET story_status = 'failed' WHERE user_id = ?", (callback.from_user.id,))
         await db.commit()
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-
-@dp.callback_query(F.data == "bob_success")
-async def bob_success(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET balance = balance + 400, story_status = 'completed' WHERE user_id = ?", (user_id,))
-        await db.commit()
-    text = (
-        "🎉 **Победа по ветке Боба!**\n\n"
-        "Вместе вы устроили засаду и поймали робота-шпиона Планктона! Экстракт спасен.\n"
-        "🎁 Награда: **+400 коинов** и статус элитного сотрудника!"
-    )
     await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-# --- ВЕТКА 3: Камеры (Глубокий детективный путь с этапами) ---
-@dp.callback_query(F.data == "branch_cam")
-async def branch_cam(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "bob_step2")
+async def bob_step2(callback: types.CallbackQuery):
     text = (
-        "📖 **Кабинет Мистера Крабса: Взлом камер**\n\n"
-        "Ты пробираешься в кабинет шефа. Монитор заблокирован трехступенчатым цифровым замком.\n"
-        "**Этап 1 из 3:** Реши алгоритмический пример безопасности:\n"
+        "📖 **Ветка 2: Финал — Ловушка на складе**\n\n"
+        "Вы с Бобом установили сеть и банку с фальшивым экстрактом. Ночью вор попался — это был робот Планктона!\n\n"
+        "🏆 **Победа!**"
+    )
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE users SET balance = balance + 500, story_status = 'completed' WHERE user_id = ?", (user_id,))
+        await db.commit()
+    await callback.message.edit_text(text + "\n\n🎁 Награда: **+500 коинов** зачислено!", reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+# --- ВЕТКА 3: КАМЕРЫ (3 полноценных этапа) ---
+@dp.callback_query(F.data == "cam_step1")
+async def cam_step1(callback: types.CallbackQuery):
+    text = (
+        "📖 **Ветка 3: Шаг 1 из 3 — Взлом терминала**\n\n"
+        "Компьютер требует решить логический пример безопасности:\n"
         "🔢 `(25 + 15) / 2 = ?`"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="15", callback_data="cam_step1_wrong"), InlineKeyboardButton(text="20", callback_data="cam_step1_right")],
-        [InlineKeyboardButton(text="25", callback_data="cam_step1_wrong")]
+        [InlineKeyboardButton(text="15", callback_data="cam_fail"), InlineKeyboardButton(text="20", callback_data="cam_step2")],
+        [InlineKeyboardButton(text="25", callback_data="cam_fail")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_step1_wrong")
-async def cam_step1_wrong(callback: types.CallbackQuery):
-    text = "❌ Неверный ответ! Терминал сжег материнскую плату и заблокировался навсегда.\n\n❌ **Квест провален!**"
+@dp.callback_query(F.data == "cam_fail")
+async def cam_fail(callback: types.CallbackQuery):
+    text = "💥 Неверно! Система сгорела от защиты.\n\n❌ **Квест провален!**"
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET story_status = 'failed' WHERE user_id = ?", (callback.from_user.id,))
         await db.commit()
     await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_step1_right")
-async def cam_step1_right(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "cam_step2")
+async def cam_step2(callback: types.CallbackQuery):
     text = (
-        "📖 **Взлом камер (Этап 2 из 3):**\n\n"
-        "Первый барьер пройден! Но система запрашивает код доступа по цветам проводов на видеозаписи.\n"
-        "В логах указано: <i>«Синий провод был перерезан на 4-й минуте, красный активен»</i>.\n"
-        "Какой провод замыкает цепь?"
+        "📖 **Ветка 3: Шаг 2 из 3 — Расшифровка проводов**\n\n"
+        "Первый барьер пройден! В логах видеокамер указано: *«Синий провод перерезан, красный активен»*. Какой провод замыкает цепь?"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔵 Синий", callback_data="cam_step2_wrong"), InlineKeyboardButton(text="🔴 Красный", callback_data="cam_step2_right")],
-        [InlineKeyboardButton(text="🟢 Зеленый", callback_data="cam_step2_wrong")]
+        [InlineKeyboardButton(text="🔵 Синий", callback_data="cam_fail"), InlineKeyboardButton(text="🔴 Красный", callback_data="cam_step3")],
+        [InlineKeyboardButton(text="🟢 Зеленый", callback_data="cam_fail")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_step2_wrong")
-async def cam_step2_wrong(callback: types.CallbackQuery):
-    text = "💥 Короткое замыкание! Данные стерты.\n\n❌ **Квест провален!**"
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET story_status = 'failed' WHERE user_id = ?", (callback.from_user.id,))
-        await db.commit()
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "cam_step2_right")
-async def cam_step2_right(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "cam_step3")
+async def cam_step3(callback: types.CallbackQuery):
     text = (
-        "📖 **Взлом камер (Финальный этап 3 из 3):**\n\n"
-        "Последний шаг! Записи расшифрованы на 99%. На видео виден силуэт вора, но лицо закрыто тенью.\n"
-        "Кто изображен на фрагменте по форме клешни?"
+        "📖 **Ветка 3: Финальный Шаг 3 из 3 — Опознание вора**\n\n"
+        "Записи расшифрованы! На видео четко виден силуэт преступника. Чья это форма клешни?"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Шелдон Планктон", callback_data="cam_final_win")],
-        [InlineKeyboardButton(text="🟣 Обычный местный житель", callback_data="cam_final_wrong")],
-        [InlineKeyboardButton(text="🟡 Сквидвард", callback_data="cam_final_wrong")]
+        [InlineKeyboardButton(text="🟢 Шелдон Планктон", callback_data="cam_win")],
+        [InlineKeyboardButton(text="🟣 Случайный прохожий", callback_data="cam_fail")],
+        [InlineKeyboardButton(text="🟡 Сквидвард", callback_data="cam_fail")]
     ])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "cam_final_wrong")
-async def cam_final_wrong(callback: types.CallbackQuery):
-    text = "❌ Ты обвинил невиновного! Настоящий преступник скрылся.\n\n❌ **Квест провален!**"
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET story_status = 'failed' WHERE user_id = ?", (callback.from_user.id,))
-        await db.commit()
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "cam_final_win")
-async def cam_final_win(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "cam_win")
+async def cam_win(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("UPDATE users SET balance = balance + 700, story_status = 'completed' WHERE user_id = ?", (user_id,))
         await db.commit()
     text = (
-        "🏆 **ТРИУМФ! ГЕННИАЛЬНОЕ РАССЛЕДОВАНИЕ!**\n\n"
-        "Ты взломал систему, доказал вину Планктона и вернул секретный экстракт Мистеру Крабсу!\n"
-        "💰 Главная награда за расследование: **+700 коинов** начислено на твой защищенный баланс!"
+        "🏆 **ТРИУМФ! ГЕНИАЛЬНОЕ РАССЛЕДОВАНИЕ!**\n\n"
+        "Ты взломал камеры, доказал вину Планктона и вернул экстракт Мистеру Крабсу!\n"
+        "💰 Главная награда: **+700 коинов** начислено на твой баланс!"
     )
     await callback.message.edit_text(text, reply_markup=get_back_keyboard(), parse_mode="Markdown")
-
-@dp.callback_query(F.data == "story_fail")
-async def story_fail(callback: types.CallbackQuery):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET story_status = 'failed' WHERE user_id = ?", (callback.from_user.id,))
-        await db.commit()
-    await callback.message.edit_text("❌ Расследование провалено.", reply_markup=get_back_keyboard(), parse_mode="Markdown")
 
 
 # Казино, Колесо, Бонусы, Топ, Рефералы
@@ -541,7 +533,7 @@ async def spin_wheel(callback: types.CallbackQuery):
         else:
             res = "😢 Пусто."
             
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]])
     await callback.message.edit_text(res, reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "casino")
@@ -577,7 +569,7 @@ async def play_dice(callback: types.CallbackQuery):
         else:
             res = f"😢 Выпало {val}. Проигрыш."
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В меню", callback_data="back_menu")]])
     await callback.message.answer(res, reply_markup=kb, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "daily_bonus")
@@ -619,7 +611,7 @@ async def back_menu(callback: types.CallbackQuery):
 async def main():
     await db_start()
     logging.basicConfig(level=logging.INFO)
-    print("Бот запущен с защитой баланса и глубоким квестом!")
+    print("Бот запущен с исправленными наградами и глубоким квестом!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
