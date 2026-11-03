@@ -129,6 +129,17 @@ async def spend(user_id: int, amount: int) -> bool:
         return cur.rowcount > 0
 
 
+async def game_payout(user_id: int, payout: int, bet: int):
+    """Начисляет выплату за игру. Чистый выигрыш (выплата минус ставка) идёт в зачёт розыгрыша."""
+    profit = max(0, payout - bet)
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            "UPDATE users SET balance = balance + ?, earned = earned + ? WHERE user_id = ?",
+            (payout, profit, user_id),
+        )
+        await db.commit()
+
+
 async def get_balance(user_id: int) -> int:
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cur:
@@ -277,14 +288,14 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message):
-    bet_wait.discard(message.from_user.id)
+    bet_wait.pop(message.from_user.id, None)
     await message.answer("Главное меню:", reply_markup=get_main_menu())
 
 
 @dp.callback_query(F.data == "back_menu")
 async def back_menu(callback: types.CallbackQuery):
     await callback.answer()
-    bet_wait.discard(callback.from_user.id)
+    bet_wait.pop(callback.from_user.id, None)
     await show(callback, "Главное меню:", get_main_menu())
 
 
@@ -302,7 +313,7 @@ async def process_balance(callback: types.CallbackQuery):
         endings += len(q["endings"]) if q else 0
     text = (
         f"👤 <b>Твой профиль:</b>\n\n💰 Баланс: <b>{balance} коинов</b>\n🛠 Смен: <b>{jobs}</b>\n"
-        f"🏆 Заработано для розыгрыша: <b>{earned}</b>\n"
+        f"🏆 В розыгрыше участвует твой баланс: <b>{balance}</b>\n"
         f"📖 Концовок квестов: <b>{endings}/{len(ENDINGS)}</b>"
     )
     await show(callback, text, get_back_keyboard())
@@ -672,28 +683,28 @@ ANSWERS = {"chef": chef_answer, "courier": courier_answer, "dishes": dishes_answ
 async def contest_text(uid):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
-            "SELECT username, earned FROM users WHERE user_id != ? AND earned > 0 ORDER BY earned DESC LIMIT 10", (OWNER_ID,)
+            "SELECT username, balance FROM users WHERE user_id != ? AND balance > 0 ORDER BY balance DESC LIMIT 10", (OWNER_ID,)
         ) as cur:
             rows = await cur.fetchall()
-        async with db.execute("SELECT earned FROM users WHERE user_id = ?", (uid,)) as cur:
+        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (uid,)) as cur:
             me = await cur.fetchone()
         mine = me[0] if me else 0
-        async with db.execute("SELECT COUNT(*) FROM users WHERE user_id != ? AND earned > ?", (OWNER_ID, mine)) as cur:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE user_id != ? AND balance > ?", (OWNER_ID, mine)) as cur:
             ahead = (await cur.fetchone())[0]
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, (name, earned) in enumerate(rows):
         mark = medals[i] if i < 3 else f"{i + 1}."
         lines.append(f"{mark} {escape(str(name))} — <b>{earned}</b>")
-    top_text = "\n".join(lines) or "Пока никто не заработал. Будь первым!"
+    top_text = "\n".join(lines) or "Пока нет участников."
     text = (
-        "🏆 <b>Розыгрыш</b>\n\nПобеждают <b>3 игрока</b>, которые заработают больше всех. "
-        "В зачёт идут только зарплата с работ и итоговая награда квестов. Казино, колесо и бонусы не считаются.\n\n"
+        "🏆 <b>Розыгрыш</b>\n\n"
+        "Побеждают <b>3 игрока с самым большим текущим балансом</b>. Баланс растёт от работ, квестов, бонуса и выигрышей в играх (казино, колесо, тир, КНБ) и падает от ставок и проигрышей.\n\n"
         f"<b>Топ-10:</b>\n{top_text}"
     )
     if uid != OWNER_ID:
         place = f"{ahead + 1} место" if mine > 0 else "ты пока вне рейтинга"
-        text += f"\n\n👤 Ты: <b>{mine}</b> ({place})"
+        text += f"\n\n👤 Твой баланс: <b>{mine}</b> ({place})"
     return text
 
 
@@ -715,7 +726,7 @@ async def contest_winners(message: types.Message):
         return
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
-            "SELECT user_id, username, earned FROM users WHERE user_id != ? AND earned > 0 ORDER BY earned DESC LIMIT 3", (OWNER_ID,)
+            "SELECT user_id, username, balance FROM users WHERE user_id != ? AND balance > 0 ORDER BY balance DESC LIMIT 3", (OWNER_ID,)
         ) as cur:
             rows = await cur.fetchall()
     if not rows:
@@ -723,17 +734,22 @@ async def contest_winners(message: types.Message):
         return
     medals = ["🥇", "🥈", "🥉"]
     lines = [f"{medals[i]} <a href=\"tg://user?id={uid}\">{escape(str(name))}</a> — {earned} (id <code>{uid}</code>)" for i, (uid, name, earned) in enumerate(rows)]
-    await message.answer("🏆 <b>Победители:</b>\n\n" + "\n".join(lines), parse_mode="HTML")
+    await message.answer("🏆 <b>Победители (по текущему балансу):</b>\n\n" + "\n".join(lines), parse_mode="HTML")
 
 
 @dp.message(Command("contest_reset"))
 async def contest_reset(message: types.Message):
     if message.from_user.id != OWNER_ID:
         return
+    if "confirm" not in (message.text or ""):
+        await message.answer(
+            "⚠️ Розыгрыш идёт по текущему балансу, поэтому сброс обнулит балансы ВСЕХ игроков до 500 коинов.\n"
+            "Чтобы подтвердить, отправь: <code>/contest_reset confirm</code>", parse_mode="HTML")
+        return
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET earned = 0")
+        await db.execute("UPDATE users SET balance = 500, earned = 0")
         await db.commit()
-    await message.answer("✅ Счётчик розыгрыша обнулён. Можно запускать новый розыгрыш.")
+    await message.answer("✅ Балансы всех игроков сброшены до 500. Можно запускать новый розыгрыш.")
 
 
 # ======================================================================
@@ -2057,76 +2073,183 @@ async def q_inventory(callback: types.CallbackQuery):
 
 
 # ======================================================================
-#                      КОЛЕСО, КАЗИНО, ТИР, КНБ
+#                  ИГРЫ СО СТАВКАМИ: КАЗИНО, КОЛЕСО, ТИР, КНБ
 # ======================================================================
-@dp.callback_query(F.data == "fortune_wheel")
-async def fortune_wheel(callback: types.CallbackQuery):
+# ---------------------------- общие настройки ставок ----------------------------
+bet_wait = {}       # user_id -> игра, для которой ждём сумму ставки сообщением
+dice_busy = set()   # пользователи, у которых прямо сейчас катится кубик
+cur_bet = {}        # (user_id, игра) -> текущая ставка
+MAX_BET_DIGITS = 12
+DEFAULT_BETS = {"casino": 50, "wheel": 100, "jelly": 30, "rps": 40}
+PRESET_BETS = (50, 100, 500)
+MENU_CB = {"casino": "casino", "fortune_wheel": "wheel", "game_jelly": "jelly", "game_rps": "rps"}
+GAME_CB = {v: k for k, v in MENU_CB.items()}
+
+
+def get_bet(uid, game):
+    return cur_bet.get((uid, game), DEFAULT_BETS[game])
+
+
+def bet_rows(game):
+    return [
+        [btn(f"💰 {n}", f"setbet:{game}:{n}") for n in PRESET_BETS],
+        [btn("✏️ Своя ставка", f"askbet:{game}")],
+    ]
+
+
+# ---------------------------- меню игр ----------------------------
+async def casino_view(uid):
+    bet, bal = get_bet(uid, "casino"), await get_balance(uid)
+    text = (
+        "🎰 <b>Казино</b>\n\nБросаешь кубик: выпало <b>4, 5 или 6</b> — выигрыш <b>x2</b> от ставки (чистая прибыль = ставка). "
+        "Выпало 1–3 — ставка сгорает.\n\n"
+        f"💰 Баланс: <b>{bal}</b>\n🎯 Ставка: <b>{bet}</b>"
+    )
+    kb = kb_rows([[btn(f"🎲 Бросить кубик ({bet})", f"dice:{bet}")]] + bet_rows("casino") + [[btn("◀️ Назад", "back_menu")]])
+    return text, kb
+
+
+async def wheel_view(uid):
+    bet, bal = get_bet(uid, "wheel"), await get_balance(uid)
+    text = (
+        "🎡 <b>Колесо Фортуны</b>\n\nМножители выплаты: <b>x0</b> (35%), <b>x0.5</b> (30%), <b>x1</b> (20%), "
+        "<b>x2</b> (10%), <b>x3.5</b> (5%).\n\n"
+        f"💰 Баланс: <b>{bal}</b>\n🎯 Ставка: <b>{bet}</b>"
+    )
+    kb = kb_rows([[btn(f"🎰 Крутить ({bet})", "spin_wheel")]] + bet_rows("wheel") + [[btn("◀️ Назад", "back_menu")]])
+    return text, kb
+
+
+async def jelly_view(uid):
+    bet, bal = get_bet(uid, "jelly"), await get_balance(uid)
+    text = (
+        "🎯 <b>Тир по медузам</b>\n\nОдна из трёх медуз золотая: попадёшь — выплата <b>x3</b> "
+        f"(чистая прибыль +{bet * 2}).\n\n💰 Баланс: <b>{bal}</b>\n🎯 Ставка за выстрел: <b>{bet}</b>"
+    )
+    rows = [[btn("🪼", "jelly_0"), btn("🪼", "jelly_1"), btn("🪼", "jelly_2")]] + bet_rows("jelly") + [[btn("◀️ Назад", "back_menu")]]
+    return text, kb_rows(rows)
+
+
+async def rps_view(uid):
+    bet, bal = get_bet(uid, "rps"), await get_balance(uid)
+    text = (
+        "✂️ <b>КНБ с Патриком</b>\n\nПобеда: выплата <b>x2</b> (прибыль +" + str(bet) + "), ничья: ставка возвращается.\n\n"
+        f"💰 Баланс: <b>{bal}</b>\n🎯 Ставка: <b>{bet}</b>"
+    )
+    rows = [[btn("🪨", "rps_rock"), btn("✂️", "rps_scissors"), btn("📄", "rps_paper")]] + bet_rows("rps") + [[btn("◀️ Назад", "back_menu")]]
+    return text, kb_rows(rows)
+
+
+VIEWS = {"casino": casino_view, "wheel": wheel_view, "jelly": jelly_view, "rps": rps_view}
+
+
+@dp.callback_query(F.data.in_(set(MENU_CB)))
+async def game_menu(callback: types.CallbackQuery):
     await callback.answer()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎰 Крутить (100 коинов)", callback_data="spin_wheel")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")],
-    ])
-    await show(callback, "🎡 <b>Колесо Фортуны</b>", kb)
+    uid = callback.from_user.id
+    bet_wait.pop(uid, None)
+    text, kb = await VIEWS[MENU_CB[callback.data]](uid)
+    await show(callback, text, kb)
+
+
+@dp.callback_query(F.data.startswith("setbet:"))
+async def set_bet(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    try:
+        _, game, n = callback.data.split(":")
+        n = int(n)
+    except ValueError:
+        await callback.answer()
+        return
+    if game not in VIEWS or n <= 0:
+        await callback.answer()
+        return
+    cur_bet[(uid, game)] = n
+    await callback.answer(f"Ставка: {n}")
+    text, kb = await VIEWS[game](uid)
+    await show(callback, text, kb)
+
+
+async def ask_bet(callback: types.CallbackQuery, game: str):
+    await callback.answer()
+    uid = callback.from_user.id
+    bal = await get_balance(uid)
+    bet_wait[uid] = game
+    await show(callback,
+               f"✏️ <b>Своя ставка</b>\n\nНа счету: <b>{bal}</b> коинов.\nОтправь в чат число: сумму ставки (от 1 до {bal}).",
+               kb_rows([[btn("◀️ Отмена", GAME_CB[game])]]))
+
+
+@dp.callback_query(F.data.startswith("askbet:"))
+async def ask_bet_cb(callback: types.CallbackQuery):
+    game = callback.data.split(":")[1]
+    if game not in VIEWS:
+        await callback.answer()
+        return
+    await ask_bet(callback, game)
+
+
+@dp.callback_query(F.data == "casino_bet")
+async def ask_bet_old(callback: types.CallbackQuery):
+    # совместимость со старыми кнопками
+    await ask_bet(callback, "casino")
+
+
+@dp.message(F.text, lambda m: m.from_user.id in bet_wait)
+async def bet_message(message: types.Message):
+    uid = message.from_user.id
+    game = bet_wait[uid]
+    raw = message.text.strip().replace(" ", "").replace(",", "").replace("_", "")
+    cancel = kb_rows([[btn("◀️ Отмена", GAME_CB[game])]])
+    if not raw.isdigit() or int(raw) <= 0 or len(raw) > MAX_BET_DIGITS:
+        await message.answer("Введи целое положительное число, например <b>250</b>.", parse_mode="HTML", reply_markup=cancel)
+        return
+    bet = int(raw)
+    bal = await get_balance(uid)
+    if bet > bal:
+        await message.answer(f"❌ Столько нет на счету. Твой баланс: <b>{bal}</b>. Введи сумму поменьше.",
+                             parse_mode="HTML", reply_markup=cancel)
+        return
+    bet_wait.pop(uid, None)
+    cur_bet[(uid, game)] = bet
+    text, kb = await VIEWS[game](uid)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ---------------------------- 🎡 Колесо Фортуны ----------------------------
+WHEEL = [(0, 35), (0.5, 30), (1, 20), (2, 10), (3.5, 5)]
 
 
 @dp.callback_query(F.data == "spin_wheel")
 async def spin_wheel(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    if not await spend(uid, 100):
+    bet = get_bet(uid, "wheel")
+    if not await spend(uid, bet):
         await callback.answer("❌ Мало коинов!", show_alert=True)
         return
     await callback.answer()
-    win = random.choices([0, 50, 100, 200, 350], weights=[35, 30, 20, 10, 5], k=1)[0]
-    if win:
-        await add_coins(uid, win)
-        res = f"🎉 Выигрыш: <b>+{win} коинов</b>!"
+    mult = random.choices([m for m, _ in WHEEL], weights=[w for _, w in WHEEL], k=1)[0]
+    payout = int(bet * mult)
+    if payout:
+        await game_payout(uid, payout, bet)
+    if payout > bet:
+        res = f"🎉 Множитель x{mult}! Выплата <b>{payout}</b> (прибыль <b>+{payout - bet}</b>)!"
+    elif payout == bet:
+        res = f"🤝 Множитель x{mult}: ставка вернулась."
+    elif payout > 0:
+        res = f"😐 Множитель x{mult}: вернулось <b>{payout}</b> (−{bet - payout})."
     else:
-        res = "😢 Пусто."
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎰 Ещё раз (100)", callback_data="spin_wheel")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")],
-    ])
-    await show(callback, res, kb)
-
-
-# ---------------------------- 🎰 Казино: любая ставка ----------------------------
-bet_wait = set()    # пользователи, от которых ждём сумму ставки сообщением
-dice_busy = set()   # пользователи, у которых прямо сейчас катится кубик
-MAX_BET_DIGITS = 12
-
-
-def casino_kb():
-    return kb_rows([
-        [btn("🎲 50", "dice:50"), btn("🎲 100", "dice:100"), btn("🎲 500", "dice:500")],
-        [btn("💰 Своя ставка", "casino_bet")],
-        [btn("◀️ Назад", "back_menu")],
-    ])
-
-
-@dp.callback_query(F.data == "casino")
-async def casino(callback: types.CallbackQuery):
-    await callback.answer()
-    bet_wait.discard(callback.from_user.id)
-    bal = await get_balance(callback.from_user.id)
-    await show(callback,
-               "🎰 <b>Казино</b>\n\nБросаешь кубик: выпало <b>4, 5 или 6</b> — выигрыш <b>x2</b> от ставки (чистая прибыль = ставка). "
-               "Выпало 1–3 — ставка сгорает.\n\n"
-               f"💰 Баланс: <b>{bal}</b>\nВыбери ставку или нажми «Своя ставка» и введи любую сумму.",
-               casino_kb())
-
-
-@dp.callback_query(F.data == "casino_bet")
-async def casino_bet(callback: types.CallbackQuery):
-    await callback.answer()
-    uid = callback.from_user.id
+        res = f"😢 Пусто. Проигрыш: <b>−{bet}</b>."
     bal = await get_balance(uid)
-    bet_wait.add(uid)
-    await show(callback,
-               f"💰 <b>Своя ставка</b>\n\nНа счету: <b>{bal}</b> коинов.\n"
-               f"Отправь в чат число: сумму ставки (от 1 до {bal}).",
-               kb_rows([[btn("◀️ Отмена", "casino")]]))
+    kb = kb_rows([
+        [btn(f"🎰 Ещё раз ({bet})", "spin_wheel")],
+        [btn("✏️ Изменить ставку", "fortune_wheel")],
+        [btn("◀️ Назад в меню", "back_menu")],
+    ])
+    await show(callback, f"{res}\n💰 Баланс: <b>{bal}</b>", kb)
 
 
+# ---------------------------- 🎰 Казино (кости) ----------------------------
 async def dice_round(uid, chat_id, bet):
     if uid in dice_busy:
         return
@@ -2136,7 +2259,7 @@ async def dice_round(uid, chat_id, bet):
             bal = await get_balance(uid)
             await bot.send_message(
                 chat_id, f"❌ Не хватает коинов. Твой баланс: <b>{bal}</b>.",
-                reply_markup=kb_rows([[btn("💰 Другая ставка", "casino_bet")], [btn("◀️ В меню", "back_menu")]]),
+                reply_markup=kb_rows([[btn("✏️ Другая ставка", "casino")], [btn("◀️ В меню", "back_menu")]]),
                 parse_mode="HTML",
             )
             return
@@ -2144,14 +2267,14 @@ async def dice_round(uid, chat_id, bet):
         await asyncio.sleep(3.5)
         val = dice.dice.value
         if val >= 4:
-            await add_coins(uid, bet * 2)
+            await game_payout(uid, bet * 2, bet)
             res = f"🎉 Выпало {val}! Выигрыш: <b>+{bet} коинов</b> (ставка вернулась x2)!"
         else:
             res = f"😢 Выпало {val}. Проигрыш: <b>−{bet} коинов</b>."
         bal = await get_balance(uid)
         kb = kb_rows([
             [btn(f"🎲 Ещё раз ({bet})", f"dice:{bet}")],
-            [btn("💰 Другая ставка", "casino_bet")],
+            [btn("✏️ Изменить ставку", "casino")],
             [btn("◀️ Назад в меню", "back_menu")],
         ])
         await bot.send_message(chat_id, f"{res}\n💰 Баланс: <b>{bal}</b>", reply_markup=kb, parse_mode="HTML")
@@ -2169,6 +2292,7 @@ async def dice_from_callback(callback: types.CallbackQuery, bet: int):
         await callback.answer(f"❌ Мало коинов! Баланс: {bal}", show_alert=True)
         return
     await callback.answer()
+    cur_bet[(uid, "casino")] = bet
     chat_id = callback.message.chat.id
     try:
         await callback.message.delete()
@@ -2193,73 +2317,36 @@ async def play_dice_old(callback: types.CallbackQuery):
     await dice_from_callback(callback, 50)
 
 
-@dp.message(F.text, lambda m: m.from_user.id in bet_wait)
-async def bet_message(message: types.Message):
-    uid = message.from_user.id
-    raw = message.text.strip().replace(" ", "").replace(",", "").replace("_", "")
-    if not raw.isdigit() or int(raw) <= 0 or len(raw) > MAX_BET_DIGITS:
-        await message.answer("Введи целое положительное число, например <b>250</b>.", parse_mode="HTML",
-                             reply_markup=kb_rows([[btn("◀️ Отмена", "casino")]]))
-        return
-    bet = int(raw)
-    bal = await get_balance(uid)
-    if bet > bal:
-        await message.answer(f"❌ Столько нет на счету. Твой баланс: <b>{bal}</b>. Введи сумму поменьше.", parse_mode="HTML",
-                             reply_markup=kb_rows([[btn("◀️ Отмена", "casino")]]))
-        return
-    bet_wait.discard(uid)
-    await dice_round(uid, message.chat.id, bet)
-
-
-@dp.callback_query(F.data == "game_jelly")
-async def game_jelly(callback: types.CallbackQuery):
-    await callback.answer()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🪼", callback_data="jelly_0"),
-         InlineKeyboardButton(text="🪼", callback_data="jelly_1"),
-         InlineKeyboardButton(text="🪼", callback_data="jelly_2")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")],
-    ])
-    await show(callback, "🎯 <b>Тир по медузам</b>\n\nВыстрел стоит 30 коинов. Одна из трёх медуз золотая: попадёшь — <b>+90</b>.", kb)
-
-
+# ---------------------------- 🎯 Тир по медузам ----------------------------
 @dp.callback_query(F.data.startswith("jelly_"))
 async def jelly_shot(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    if not await spend(uid, 30):
+    bet = get_bet(uid, "jelly")
+    if not await spend(uid, bet):
         await callback.answer("❌ Мало коинов!", show_alert=True)
         return
     await callback.answer()
     pick = int(callback.data.split("_")[1])
     gold = random.randint(0, 2)
     if pick == gold:
-        await add_coins(uid, 90)
-        res = "🎯 Попал в золотую медузу! <b>+90 коинов</b>!"
+        await game_payout(uid, bet * 3, bet)
+        res = f"🎯 Попал в золотую медузу! <b>+{bet * 2} коинов</b> чистой прибыли!"
     else:
-        res = "💨 Мимо! Золотая медуза уплыла."
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Ещё выстрел (30)", callback_data="game_jelly")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")],
+        res = f"💨 Мимо! Золотая медуза уплыла. Проигрыш: <b>−{bet}</b>."
+    bal = await get_balance(uid)
+    kb = kb_rows([
+        [btn(f"🎯 Ещё выстрел ({bet})", "game_jelly")],
+        [btn("◀️ Назад в меню", "back_menu")],
     ])
-    await show(callback, res, kb)
+    await show(callback, f"{res}\n💰 Баланс: <b>{bal}</b>", kb)
 
 
-@dp.callback_query(F.data == "game_rps")
-async def game_rps(callback: types.CallbackQuery):
-    await callback.answer()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🪨", callback_data="rps_rock"),
-         InlineKeyboardButton(text="✂️", callback_data="rps_scissors"),
-         InlineKeyboardButton(text="📄", callback_data="rps_paper")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")],
-    ])
-    await show(callback, "✂️ <b>КНБ с Патриком</b>\n\nСтавка 40 коинов. Победа: +80, ничья: ставка возвращается.", kb)
-
-
+# ---------------------------- ✂️ КНБ с Патриком ----------------------------
 @dp.callback_query(F.data.startswith("rps_"))
 async def rps_play(callback: types.CallbackQuery):
     uid = callback.from_user.id
-    if not await spend(uid, 40):
+    bet = get_bet(uid, "rps")
+    if not await spend(uid, bet):
         await callback.answer("❌ Мало коинов!", show_alert=True)
         return
     await callback.answer()
@@ -2268,18 +2355,19 @@ async def rps_play(callback: types.CallbackQuery):
     me = callback.data.split("_")[1]
     pat = random.choice(list(names))
     if me == pat:
-        await add_coins(uid, 40)
+        await game_payout(uid, bet, bet)
         res = "🤝 Ничья, ставка возвращена."
     elif beats[me] == pat:
-        await add_coins(uid, 80)
-        res = "🎉 Ты победил! <b>+80 коинов</b>"
+        await game_payout(uid, bet * 2, bet)
+        res = f"🎉 Ты победил! <b>+{bet} коинов</b>"
     else:
-        res = "😢 Патрик выиграл (случайно)."
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✂️ Ещё раунд (40)", callback_data="game_rps")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_menu")],
+        res = f"😢 Патрик выиграл (случайно). Проигрыш: <b>−{bet}</b>."
+    bal = await get_balance(uid)
+    kb = kb_rows([
+        [btn(f"✂️ Ещё раунд ({bet})", "game_rps")],
+        [btn("◀️ Назад в меню", "back_menu")],
     ])
-    await show(callback, f"Ты: {names[me]}  |  Патрик: {names[pat]}\n\n{res}", kb)
+    await show(callback, f"Ты: {names[me]}  |  Патрик: {names[pat]}\n\n{res}\n💰 Баланс: <b>{bal}</b>", kb)
 
 
 # ======================================================================
