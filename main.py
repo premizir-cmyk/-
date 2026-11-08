@@ -2,7 +2,7 @@
 Телеграм-бот: база отзывов (скрин + текст + ссылка).
 
 Зависимости: requirements.txt (aiogram, aiosqlite)
-Запуск:      python review_bot.py
+Запуск:      python main.py (токен берётся из переменной BOT_TOKEN)
 """
 import asyncio
 import logging
@@ -16,9 +16,9 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import InputMediaPhoto, KeyboardButton, Message, ReplyKeyboardMarkup
 
-TOKEN = os.getenv("BOT_TOKEN") or "9149595437:AAFzA4uUdI8xOsH2i_CLLBRjDUdY9GocfzM"
+TOKEN = os.getenv("BOT_TOKEN", "")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reviews.db")
 URL_RE = re.compile(r"https?://\S+")
 MATCH_THRESHOLD = 0.75  # минимальная похожесть текста (0..1)
@@ -26,6 +26,7 @@ MAX_RESULTS = 3
 
 BTN_ADD = "➕ Добавить"
 BTN_CANCEL = "❌ Отмена"
+BTN_PASSED = "✅ Пройденные"
 
 router = Router()
 
@@ -36,7 +37,10 @@ class Adding(StatesGroup):
 
 def kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_CANCEL)]],
+        keyboard=[
+            [KeyboardButton(text=BTN_PASSED)],
+            [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_CANCEL)],
+        ],
         resize_keyboard=True,
     )
 
@@ -58,6 +62,13 @@ async def init_db():
                 created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )"""
         )
+        # миграция для старых баз: колонки «пройден»
+        cur = await db.execute("PRAGMA table_info(reviews)")
+        cols = [r[1] for r in await cur.fetchall()]
+        if "passed" not in cols:
+            await db.execute("ALTER TABLE reviews ADD COLUMN passed INTEGER NOT NULL DEFAULT 0")
+        if "passed_at" not in cols:
+            await db.execute("ALTER TABLE reviews ADD COLUMN passed_at TIMESTAMP")
         await db.commit()
 
 
@@ -118,7 +129,8 @@ async def start(message: Message, state: FSMContext):
         "Привет! Как пользоваться:\n\n"
         "• Добавить отзыв: перешли скрин, текст и ссылку (по отдельности, в любом порядке). "
         "Если начинаешь с текста — сначала нажми «➕ Добавить».\n"
-        "• Найти: просто отправь текст отзыва — пришлю скрин и ссылку.",
+        "• Найти: просто отправь текст отзыва — пришлю скрин и ссылку, а отзыв попадёт в пройденные.\n"
+        "• Кнопка «✅ Пройденные» — скрины и ссылки всех пройденных.",
         reply_markup=kb(),
     )
 
@@ -129,6 +141,30 @@ async def add_mode(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(Adding.collecting)
     await message.answer("Режим добавления. Присылай скрин, текст и ссылку.", reply_markup=kb())
+
+
+@router.message(F.text == BTN_PASSED)
+async def passed_list(message: Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT photo, link FROM reviews WHERE passed = 1 ORDER BY passed_at, id"
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        await message.answer("Пройденных пока нет.")
+        return
+
+    await message.answer(f"Пройденные отзывы: {len(rows)}")
+    for i in range(0, len(rows), 10):
+        chunk = rows[i:i + 10]
+        if len(chunk) == 1:
+            photo, link = chunk[0]
+            await message.answer_photo(photo, caption=link[:1024])
+        else:
+            media = [InputMediaPhoto(media=photo, caption=link[:1024]) for photo, link in chunk]
+            await message.answer_media_group(media)
+        await asyncio.sleep(0.5)
 
 
 @router.message(Command("cancel"))
@@ -172,34 +208,48 @@ async def search(message: Message):
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT text, text_norm, photo, link FROM reviews")
+        cur = await db.execute("SELECT id, text, text_norm, photo, link, passed FROM reviews")
         rows = await cur.fetchall()
 
-    scored = []
-    for text, tn, photo, link in rows:
-        if q == tn:
-            score = 1.0
-        elif len(q) >= 15 and (q in tn or tn in q):
-            score = 0.95
-        else:
-            score = SequenceMatcher(None, q, tn).ratio()
-        if score >= MATCH_THRESHOLD:
-            scored.append((score, text, photo, link))
+        scored = []
+        for rid, text, tn, photo, link, passed in rows:
+            if q == tn:
+                score = 1.0
+            elif len(q) >= 15 and (q in tn or tn in q):
+                score = 0.95
+            else:
+                score = SequenceMatcher(None, q, tn).ratio()
+            if score >= MATCH_THRESHOLD:
+                scored.append((score, rid, text, photo, link, passed))
 
-    if not scored:
-        await message.answer("Такого текста в базе нет.")
-        return
+        if not scored:
+            await message.answer("Такого текста в базе нет.")
+            return
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    for score, text, photo, link in scored[:MAX_RESULTS]:
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # лучший результат считаем пройденным
+        best_id = scored[0][1]
+        await db.execute(
+            "UPDATE reviews SET passed = 1, passed_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND passed = 0",
+            (best_id,),
+        )
+        await db.commit()
+
+    for n, (score, rid, text, photo, link, passed) in enumerate(scored[:MAX_RESULTS]):
         snippet = text if len(text) <= 300 else text[:300] + "…"
-        caption = f"🔗 {link}\n\nСовпадение: {int(score * 100)}%\n\n{snippet}"
+        if n == 0:
+            mark = "✅ Уже в пройденных" if passed else "✅ Отмечен как пройденный"
+        else:
+            mark = "Похожий отзыв"
+        caption = f"{mark}\n🔗 {link}\n\nСовпадение: {int(score * 100)}%\n\n{snippet}"
         await message.answer_photo(photo, caption=caption[:1024])
 
 
 async def main():
     if not TOKEN:
-        raise SystemExit("Укажи токен в переменной окружения BOT_TOKEN")
+        raise SystemExit("Укажи токен в переменной окружения BOT_TOKEN (в настройках хостинга)")
     logging.basicConfig(level=logging.INFO)
     await init_db()
     bot = Bot(TOKEN)
