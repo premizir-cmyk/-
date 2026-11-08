@@ -8,6 +8,8 @@ import asyncio
 import logging
 import os
 import re
+import shutil
+import sqlite3
 from difflib import SequenceMatcher
 
 import aiosqlite
@@ -16,10 +18,33 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InputMediaPhoto, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 TOKEN = os.getenv("BOT_TOKEN", "")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reviews.db")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_data_dir = os.path.join(BASE_DIR, "data")
+if os.getenv("DB_PATH"):
+    DB_PATH = os.getenv("DB_PATH")
+elif os.path.isdir(_data_dir):
+    # на хостинге есть папка data (она сохраняется между обновлениями)
+    DB_PATH = os.path.join(_data_dir, "reviews.db")
+    _old = os.path.join(BASE_DIR, "reviews.db")
+    if os.path.exists(_old) and not os.path.exists(DB_PATH):
+        shutil.copy2(_old, DB_PATH)
+else:
+    DB_PATH = os.path.join(BASE_DIR, "reviews.db")
+os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+# кому можно делать /backup и восстановление (ID через запятую). Пусто = всем.
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 URL_RE = re.compile(r"https?://\S+")
 MATCH_THRESHOLD = 0.75  # минимальная похожесть текста (0..1)
 MAX_RESULTS = 3
@@ -27,6 +52,7 @@ MAX_RESULTS = 3
 BTN_ADD = "➕ Добавить"
 BTN_CANCEL = "❌ Отмена"
 BTN_PASSED = "✅ Пройденные"
+BTN_RESET = "🔄 Сбросить пройденные"
 
 router = Router()
 
@@ -38,7 +64,7 @@ class Adding(StatesGroup):
 def kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_PASSED)],
+            [KeyboardButton(text=BTN_PASSED), KeyboardButton(text=BTN_RESET)],
             [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_CANCEL)],
         ],
         resize_keyboard=True,
@@ -130,7 +156,8 @@ async def start(message: Message, state: FSMContext):
         "• Добавить отзыв: перешли скрин, текст и ссылку (по отдельности, в любом порядке). "
         "Если начинаешь с текста — сначала нажми «➕ Добавить».\n"
         "• Найти: просто отправь текст отзыва — пришлю скрин и ссылку, а отзыв попадёт в пройденные.\n"
-        "• Кнопка «✅ Пройденные» — скрины и ссылки всех пройденных.",
+        "• Кнопка «✅ Пройденные» — скрины и ссылки всех пройденных.\n"
+        "• Кнопка «🔄 Сбросить пройденные» — начать новый отчёт.",
         reply_markup=kb(),
     )
 
@@ -172,6 +199,89 @@ async def passed_list(message: Message):
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Отменено. Теперь я в режиме поиска.", reply_markup=kb())
+
+
+def is_admin(message: Message) -> bool:
+    return not ADMIN_IDS or message.from_user.id in ADMIN_IDS
+
+
+@router.message(Command("backup"))
+async def backup(message: Message):
+    if not is_admin(message) or not os.path.exists(DB_PATH):
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM reviews")
+        (n,) = await cur.fetchone()
+    await message.answer_document(
+        FSInputFile(DB_PATH, filename="reviews.db"),
+        caption=f"Копия базы, записей: {n}. Чтобы восстановить, просто отправь этот файл боту.",
+    )
+
+
+@router.message(F.document & F.document.file_name.endswith(".db"))
+async def restore(message: Message):
+    if not is_admin(message):
+        return
+    tmp = DB_PATH + ".restore"
+    await message.bot.download(message.document, destination=tmp)
+    try:
+        con = sqlite3.connect(tmp)
+        con.execute("SELECT COUNT(*) FROM reviews").fetchone()
+        con.close()
+    except Exception:
+        os.remove(tmp)
+        await message.answer("❌ Это не похоже на файл базы бота, не восстановил.")
+        return
+    os.replace(tmp, DB_PATH)
+    await init_db()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM reviews")
+        (n,) = await cur.fetchone()
+    await message.answer(f"✅ База восстановлена, записей: {n}")
+
+
+@router.message(F.text == BTN_RESET)
+async def reset_ask(message: Message):
+    if not is_admin(message):
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM reviews WHERE passed = 1")
+        (n,) = await cur.fetchone()
+    if n == 0:
+        await message.answer("Пройденных нет, сбрасывать нечего.")
+        return
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да, сбросить", callback_data="reset_yes"),
+            InlineKeyboardButton(text="Отмена", callback_data="reset_no"),
+        ]]
+    )
+    await message.answer(
+        f"Сбросить пройденные ({n} шт.)? Сами отзывы останутся в базе, "
+        "просто снова станут непройденными.",
+        reply_markup=markup,
+    )
+
+
+@router.callback_query(F.data == "reset_yes")
+async def reset_yes(call: CallbackQuery):
+    if ADMIN_IDS and call.from_user.id not in ADMIN_IDS:
+        await call.answer()
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE reviews SET passed = 0, passed_at = NULL WHERE passed = 1"
+        )
+        n = cur.rowcount
+        await db.commit()
+    await call.message.edit_text(f"🔄 Сброшено пройденных: {n}. Можно начинать новый отчёт.")
+    await call.answer()
+
+
+@router.callback_query(F.data == "reset_no")
+async def reset_no(call: CallbackQuery):
+    await call.message.edit_text("Отменено, пройденные остались как были.")
+    await call.answer()
 
 
 @router.message(Command("count"))
