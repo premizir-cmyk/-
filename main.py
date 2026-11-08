@@ -134,10 +134,18 @@ async def collect(message: Message, state: FSMContext):
     # всё собрано — сохраняем
     tn = norm(data["text"])
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id FROM reviews WHERE text_norm = ?", (tn,))
+        cur = await db.execute(
+            "SELECT photo, link, text FROM reviews WHERE text_norm = ?", (tn,)
+        )
         exists = await cur.fetchone()
         if exists:
-            await message.answer("⚠️ Такой текст уже есть в базе, не сохранил.", reply_markup=kb())
+            photo, link, old_text = exists
+            snippet = old_text if len(old_text) <= 300 else old_text[:300] + "…"
+            await message.answer_photo(
+                photo,
+                caption=f"⚠️ Такой текст уже есть в базе, не сохранил.\n🔗 {link}\n\n{snippet}"[:1024],
+                reply_markup=kb(),
+            )
         else:
             await db.execute(
                 "INSERT INTO reviews (text, text_norm, photo, link) VALUES (?, ?, ?, ?)",
