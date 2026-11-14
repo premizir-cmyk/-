@@ -25,6 +25,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
     KeyboardButton,
+    LinkPreviewOptions,
     Message,
     ReplyKeyboardMarkup,
 )
@@ -98,6 +99,108 @@ async def init_db():
         await db.commit()
 
 
+# ---------- автокопия базы в Telegram (чтобы данные не пропадали) ----------
+# Нужна переменная ADMIN_IDS (твой Telegram ID, узнать: команда /id).
+# Бот сам присылает файл базы в личку и закрепляет его. Если после обновления
+# кода база окажется пустой, бот сам достанет закреплённую копию и восстановит её.
+
+_dirty = False
+
+
+def mark_dirty():
+    global _dirty
+    _dirty = True
+
+
+def valid_db(path: str) -> bool:
+    try:
+        con = sqlite3.connect(path)
+        con.execute("SELECT COUNT(*) FROM reviews").fetchone()
+        con.close()
+        return True
+    except Exception:
+        return False
+
+
+async def count_reviews() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM reviews")
+        (n,) = await cur.fetchone()
+    return n
+
+
+def _snapshot(dst: str):
+    src = sqlite3.connect(DB_PATH)
+    out = sqlite3.connect(dst)
+    src.backup(out)
+    out.close()
+    src.close()
+
+
+async def send_backup(bot: Bot):
+    n = await count_reviews()
+    if n == 0:
+        return  # пустой базой не затираем хорошую копию
+    snap = DB_PATH + ".snap"
+    await asyncio.to_thread(_snapshot, snap)
+    for admin in ADMIN_IDS:
+        try:
+            msg = await bot.send_document(
+                admin,
+                FSInputFile(snap, filename="reviews.db"),
+                caption=f"💾 Авто-копия базы, записей: {n}",
+                disable_notification=True,
+            )
+            try:
+                await bot.unpin_all_chat_messages(admin)
+            except Exception:
+                pass
+            await bot.pin_chat_message(admin, msg.message_id, disable_notification=True)
+        except Exception:
+            logging.exception("Не удалось отправить копию базы %s", admin)
+    try:
+        os.remove(snap)
+    except OSError:
+        pass
+
+
+async def backup_loop(bot: Bot):
+    global _dirty
+    while True:
+        await asyncio.sleep(30)
+        if _dirty and ADMIN_IDS:
+            _dirty = False
+            try:
+                await send_backup(bot)
+            except Exception:
+                logging.exception("backup_loop")
+
+
+async def auto_restore(bot: Bot):
+    """Если база пустая (после переустановки) — берём закреплённую копию из Telegram."""
+    if not ADMIN_IDS or await count_reviews() > 0:
+        return
+    for admin in ADMIN_IDS:
+        try:
+            chat = await bot.get_chat(admin)
+            pm = getattr(chat, "pinned_message", None)
+            doc = pm.document if pm else None
+            if not doc or not (doc.file_name or "").endswith(".db"):
+                continue
+            tmp = DB_PATH + ".restore"
+            await bot.download(doc, destination=tmp)
+            if not valid_db(tmp):
+                os.remove(tmp)
+                continue
+            os.replace(tmp, DB_PATH)
+            await init_db()
+            n = await count_reviews()
+            await bot.send_message(admin, f"✅ База восстановлена автоматически, записей: {n}")
+            return
+        except Exception:
+            logging.exception("auto_restore")
+
+
 # ---------- добавление ----------
 
 async def collect(message: Message, state: FSMContext):
@@ -152,6 +255,7 @@ async def collect(message: Message, state: FSMContext):
                 (data["text"], tn, data["photo"], data["link"]),
             )
             await db.commit()
+            mark_dirty()
             await message.answer("✅ Сохранено в базу.", reply_markup=kb())
     await state.clear()
 
@@ -164,7 +268,7 @@ async def start(message: Message, state: FSMContext):
         "• Добавить отзыв: перешли скрин, текст и ссылку (каждое отдельным сообщением, в любом порядке). Из сообщения со ссылкой бот берёт только ссылку. "
         "Если начинаешь с текста — сначала нажми «➕ Добавить».\n"
         "• Найти: просто отправь текст отзыва — пришлю скрин и ссылку, а отзыв попадёт в пройденные.\n"
-        "• Кнопка «✅ Пройденные» — скрины и ссылки всех пройденных.\n"
+        "• Кнопка «✅ Пройденные» — пройденные по порядку: ссылка и её скрины со ссылками.\n"
         "• Кнопка «🔄 Сбросить пройденные» — начать новый отчёт.",
         reply_markup=kb(),
     )
@@ -190,15 +294,22 @@ async def passed_list(message: Message):
         await message.answer("Пройденных пока нет.")
         return
 
-    await message.answer(f"Пройденные отзывы: {len(rows)}")
-    for i in range(0, len(rows), 10):
-        chunk = rows[i:i + 10]
-        if len(chunk) == 1:
-            photo, link = chunk[0]
-            await message.answer_photo(photo, caption=link[:1024])
-        else:
-            media = [InputMediaPhoto(media=photo, caption=link[:1024]) for photo, link in chunk]
-            await message.answer_media_group(media)
+    # группируем по ссылке, порядок — по первому пройденному
+    groups: dict[str, list[str]] = {}
+    for photo, link in rows:
+        groups.setdefault(link, []).append(photo)
+
+    await message.answer(f"Пройденные: ссылок {len(groups)}, отзывов {len(rows)}")
+    no_preview = LinkPreviewOptions(is_disabled=True)
+    for num, (link, photos) in enumerate(groups.items(), 1):
+        await message.answer(f"{num}) {link}", link_preview_options=no_preview)
+        for i in range(0, len(photos), 10):
+            chunk = photos[i:i + 10]
+            if len(chunk) == 1:
+                await message.answer_photo(chunk[0], caption=link[:1024])
+            else:
+                media = [InputMediaPhoto(media=p, caption=link[:1024]) for p in chunk]
+                await message.answer_media_group(media)
         await asyncio.sleep(0.5)
 
 
@@ -242,9 +353,8 @@ async def restore(message: Message):
         return
     os.replace(tmp, DB_PATH)
     await init_db()
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM reviews")
-        (n,) = await cur.fetchone()
+    n = await count_reviews()
+    mark_dirty()
     await message.answer(f"✅ База восстановлена, записей: {n}")
 
 
@@ -282,6 +392,7 @@ async def reset_yes(call: CallbackQuery):
         )
         n = cur.rowcount
         await db.commit()
+    mark_dirty()
     await call.message.edit_text(f"🔄 Сброшено пройденных: {n}. Можно начинать новый отчёт.")
     await call.answer()
 
@@ -290,6 +401,11 @@ async def reset_yes(call: CallbackQuery):
 async def reset_no(call: CallbackQuery):
     await call.message.edit_text("Отменено, пройденные остались как были.")
     await call.answer()
+
+
+@router.message(Command("id"))
+async def my_id(message: Message):
+    await message.answer(f"Твой Telegram ID: {message.from_user.id}")
 
 
 @router.message(Command("count"))
@@ -348,12 +464,15 @@ async def search(message: Message):
 
         # лучший результат считаем пройденным
         best_id = scored[0][1]
-        await db.execute(
+        upd = await db.execute(
             "UPDATE reviews SET passed = 1, passed_at = CURRENT_TIMESTAMP "
             "WHERE id = ? AND passed = 0",
             (best_id,),
         )
+        changed = upd.rowcount
         await db.commit()
+    if changed:
+        mark_dirty()
 
     for n, (score, rid, text, photo, link, passed) in enumerate(scored[:MAX_RESULTS]):
         snippet = text if len(text) <= 300 else text[:300] + "…"
@@ -371,9 +490,16 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
     bot = Bot(TOKEN)
+    if not ADMIN_IDS:
+        logging.warning("ADMIN_IDS не задан: автокопия базы в Telegram выключена")
+    await auto_restore(bot)
+    backup_task = asyncio.create_task(backup_loop(bot))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        backup_task.cancel()
 
 
 if __name__ == "__main__":
