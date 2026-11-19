@@ -47,15 +47,18 @@ os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
 # кому можно делать /backup и восстановление (ID через запятую). Пусто = всем.
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 URL_RE = re.compile(r"https?://\S+")
-MATCH_THRESHOLD = 0.75  # минимальная похожесть текста (0..1)
+AUTO_THRESHOLD = 0.90   # от этого значения бот сам отмечает отзыв пройденным
+MAYBE_THRESHOLD = 0.60  # от этого значения показывает как «возможно, это он»
 MAX_RESULTS = 3
 
 BTN_ADD = "➕ Добавить"
 BTN_CANCEL = "❌ Отмена"
 BTN_PASSED = "✅ Пройденные"
 BTN_RESET = "🔄 Сбросить пройденные"
+BTN_UNPASS = "↩️ Убрать из пройденных"
 
 router = Router()
+PENDING_DUP: dict[int, dict] = {}  # данные, ждущие решения «заменить / оставить»
 
 
 class Adding(StatesGroup):
@@ -66,10 +69,24 @@ def kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_PASSED), KeyboardButton(text=BTN_RESET)],
+            [KeyboardButton(text=BTN_UNPASS)],
             [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_CANCEL)],
         ],
         resize_keyboard=True,
     )
+
+
+def extract_link(message: Message):
+    """Ссылка из сообщения: видимая или спрятанная под текстом («Смотрите»)."""
+    raw = message.text or message.caption or ""
+    ents = list(message.entities or []) + list(message.caption_entities or [])
+    for e in ents:
+        if e.type == "text_link" and e.url:
+            return e.url
+        if e.type == "url":
+            return e.extract_from(raw)
+    m = URL_RE.search(raw)
+    return m.group(0) if m else None
 
 
 def norm(s: str) -> str:
@@ -211,9 +228,9 @@ async def collect(message: Message, state: FSMContext):
         data["photo"] = message.photo[-1].file_id
 
     raw = message.text or message.caption or ""
-    m = URL_RE.search(raw)
-    if m:
-        data["link"] = m.group(0)
+    link = extract_link(message)
+    if link:
+        data["link"] = link
         raw = ""  # текст рядом со ссылкой (название организации и т.п.) не берём
     raw = raw.strip()
     if raw:
@@ -238,16 +255,23 @@ async def collect(message: Message, state: FSMContext):
     tn = norm(data["text"])
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT photo, link, text FROM reviews WHERE text_norm = ?", (tn,)
+            "SELECT id, photo, link, text FROM reviews WHERE text_norm = ?", (tn,)
         )
         exists = await cur.fetchone()
         if exists:
-            photo, link, old_text = exists
+            old_id, photo, link, old_text = exists
             snippet = old_text if len(old_text) <= 300 else old_text[:300] + "…"
+            PENDING_DUP[message.from_user.id] = dict(data)
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="🔁 Заменить старую новой", callback_data=f"dup_replace:{old_id}"),
+                    InlineKeyboardButton(text="Оставить", callback_data="dup_keep"),
+                ]]
+            )
             await message.answer_photo(
                 photo,
-                caption=f"⚠️ Такой текст уже есть в базе, не сохранил.\n🔗 {link}\n\n{snippet}"[:1024],
-                reply_markup=kb(),
+                caption=f"⚠️ Такой текст уже есть в базе.\n🔗 {link}\n\n{snippet}"[:1024],
+                reply_markup=markup,
             )
         else:
             await db.execute(
@@ -269,6 +293,7 @@ async def start(message: Message, state: FSMContext):
         "Если начинаешь с текста — сначала нажми «➕ Добавить».\n"
         "• Найти: просто отправь текст отзыва — пришлю скрин и ссылку, а отзыв попадёт в пройденные.\n"
         "• Кнопка «✅ Пройденные» — пройденные по порядку: ссылка и её скрины со ссылками.\n"
+        "• Кнопка «↩️ Убрать из пройденных» — убрать отдельные отзывы из списка.\n"
         "• Кнопка «🔄 Сбросить пройденные» — начать новый отчёт.",
         reply_markup=kb(),
     )
@@ -403,6 +428,79 @@ async def reset_no(call: CallbackQuery):
     await call.answer()
 
 
+@router.message(F.text == BTN_UNPASS)
+async def unpass_list(message: Message):
+    if not is_admin(message):
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, photo, link, text FROM reviews WHERE passed = 1 ORDER BY passed_at, id"
+        )
+        rows = await cur.fetchall()
+    if not rows:
+        await message.answer("Пройденных пока нет.")
+        return
+    await message.answer("Нажми «❌ Убрать» под отзывом, который нужно убрать из пройденных:")
+    for rid, photo, link, text in rows:
+        snippet = text if len(text) <= 150 else text[:150] + "…"
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Убрать из пройденных", callback_data=f"unpass:{rid}")
+            ]]
+        )
+        await message.answer_photo(photo, caption=f"🔗 {link}\n\n{snippet}"[:1024], reply_markup=markup)
+        await asyncio.sleep(0.3)
+
+
+@router.callback_query(F.data.startswith("unpass:"))
+async def unpass(call: CallbackQuery):
+    if ADMIN_IDS and call.from_user.id not in ADMIN_IDS:
+        await call.answer()
+        return
+    rid = int(call.data.split(":")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE reviews SET passed = 0, passed_at = NULL WHERE id = ?", (rid,))
+        await db.commit()
+    mark_dirty()
+    try:
+        await call.message.edit_caption(caption="↩️ Убрано из пройденных")
+    except Exception:
+        pass
+    await call.answer("Убрано")
+
+
+@router.callback_query(F.data.startswith("dup_replace:"))
+async def dup_replace(call: CallbackQuery):
+    old_id = int(call.data.split(":")[1])
+    data = PENDING_DUP.pop(call.from_user.id, None)
+    if not data:
+        await call.answer("Данные устарели, добавь отзыв заново", show_alert=True)
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM reviews WHERE id = ?", (old_id,))
+        await db.execute(
+            "INSERT INTO reviews (text, text_norm, photo, link) VALUES (?, ?, ?, ?)",
+            (data["text"], norm(data["text"]), data["photo"], data["link"]),
+        )
+        await db.commit()
+    mark_dirty()
+    try:
+        await call.message.edit_caption(caption="🔁 Старая запись заменена новой.")
+    except Exception:
+        pass
+    await call.answer("Заменено")
+
+
+@router.callback_query(F.data == "dup_keep")
+async def dup_keep(call: CallbackQuery):
+    PENDING_DUP.pop(call.from_user.id, None)
+    try:
+        await call.message.edit_caption(caption="Оставил старую запись как есть.")
+    except Exception:
+        pass
+    await call.answer()
+
+
 @router.message(Command("id"))
 async def my_id(message: Message):
     await message.answer(f"Твой Telegram ID: {message.from_user.id}")
@@ -428,12 +526,43 @@ async def auto_add_photo(message: Message, state: FSMContext):
     await collect(message, state)
 
 
-@router.message(F.text.regexp(URL_RE))
+@router.message(lambda m: bool(m.text) and extract_link(m) is not None)
 async def auto_add_link(message: Message, state: FSMContext):
     await collect(message, state)
 
 
 # ---------- поиск ----------
+
+def similarity(q: str, tn: str) -> float:
+    if q == tn:
+        return 1.0
+    short, long_ = sorted((q, tn), key=len)
+    # один текст целиком внутри другого — только если они почти одной длины
+    if len(short) >= 15 and short in long_ and len(short) / len(long_) >= 0.8:
+        return 0.97
+    return SequenceMatcher(None, q, tn).ratio()
+
+
+@router.callback_query(F.data.startswith("pass:"))
+async def pass_one(call: CallbackQuery):
+    if ADMIN_IDS and call.from_user.id not in ADMIN_IDS:
+        await call.answer()
+        return
+    rid = int(call.data.split(":")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE reviews SET passed = 1, passed_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND passed = 0",
+            (rid,),
+        )
+        await db.commit()
+    mark_dirty()
+    try:
+        await call.message.edit_caption(caption="✅ Отмечен как пройденный")
+    except Exception:
+        pass
+    await call.answer("Отмечено")
+
 
 @router.message(F.text)
 async def search(message: Message):
@@ -447,13 +576,8 @@ async def search(message: Message):
 
         scored = []
         for rid, text, tn, photo, link, passed in rows:
-            if q == tn:
-                score = 1.0
-            elif len(q) >= 15 and (q in tn or tn in q):
-                score = 0.95
-            else:
-                score = SequenceMatcher(None, q, tn).ratio()
-            if score >= MATCH_THRESHOLD:
+            score = similarity(q, tn)
+            if score >= MAYBE_THRESHOLD:
                 scored.append((score, rid, text, photo, link, passed))
 
         if not scored:
@@ -461,27 +585,41 @@ async def search(message: Message):
             return
 
         scored.sort(key=lambda x: x[0], reverse=True)
+        best = scored[0]
 
-        # лучший результат считаем пройденным
-        best_id = scored[0][1]
-        upd = await db.execute(
-            "UPDATE reviews SET passed = 1, passed_at = CURRENT_TIMESTAMP "
-            "WHERE id = ? AND passed = 0",
-            (best_id,),
-        )
-        changed = upd.rowcount
-        await db.commit()
-    if changed:
-        mark_dirty()
-
-    for n, (score, rid, text, photo, link, passed) in enumerate(scored[:MAX_RESULTS]):
-        snippet = text if len(text) <= 300 else text[:300] + "…"
-        if n == 0:
+        # уверенное совпадение — отмечаем пройденным сами
+        if best[0] >= AUTO_THRESHOLD:
+            score, rid, text, photo, link, passed = best
+            upd = await db.execute(
+                "UPDATE reviews SET passed = 1, passed_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND passed = 0",
+                (rid,),
+            )
+            changed = upd.rowcount
+            await db.commit()
+            if changed:
+                mark_dirty()
+            snippet = text if len(text) <= 300 else text[:300] + "…"
             mark = "✅ Уже в пройденных" if passed else "✅ Отмечен как пройденный"
+            caption = f"{mark}\n🔗 {link}\n\nСовпадение: {int(score * 100)}%\n\n{snippet}"
+            await message.answer_photo(photo, caption=caption[:1024])
+            return
+
+    # неуверенно — ничего не отмечаем, даём выбрать
+    await message.answer("Точного совпадения нет. Возможно, это один из них:")
+    for score, rid, text, photo, link, passed in scored[:MAX_RESULTS]:
+        snippet = text if len(text) <= 300 else text[:300] + "…"
+        caption = f"🔗 {link}\n\nСовпадение: {int(score * 100)}%\n\n{snippet}"
+        markup = None
+        if not passed:
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="✅ Это он, отметить", callback_data=f"pass:{rid}")
+                ]]
+            )
         else:
-            mark = "Похожий отзыв"
-        caption = f"{mark}\n🔗 {link}\n\nСовпадение: {int(score * 100)}%\n\n{snippet}"
-        await message.answer_photo(photo, caption=caption[:1024])
+            caption = "✅ Уже в пройденных\n" + caption
+        await message.answer_photo(photo, caption=caption[:1024], reply_markup=markup)
 
 
 async def main():
