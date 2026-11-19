@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 from difflib import SequenceMatcher
 
 import aiosqlite
@@ -59,6 +60,8 @@ BTN_UNPASS = "↩️ Убрать из пройденных"
 
 router = Router()
 PENDING_DUP: dict[int, dict] = {}  # данные, ждущие решения «заменить / оставить»
+LAST_NOTFOUND: dict[int, tuple] = {}  # user_id -> (время, текст): последний текст, которого нет в базе
+NOTFOUND_TTL = 600  # сколько секунд помним такой текст для добавления
 
 
 class Adding(StatesGroup):
@@ -235,6 +238,14 @@ async def collect(message: Message, state: FSMContext):
     raw = raw.strip()
     if raw:
         data["text"] = raw
+        data["prefilled"] = False
+
+    # текст, который только что не нашёлся в поиске, подставляем как текст нового отзыва
+    if "text" not in data:
+        item = LAST_NOTFOUND.pop(message.from_user.id, None)
+        if item and time.time() - item[0] <= NOTFOUND_TTL:
+            data["text"] = item[1]
+            data["prefilled"] = True
 
     await state.set_state(Adding.collecting)
     await state.set_data(data)
@@ -248,10 +259,30 @@ async def collect(message: Message, state: FSMContext):
         missing.append("ссылку")
 
     if missing:
-        await message.answer("Принял. Осталось: " + ", ".join(missing), reply_markup=kb())
+        note = "\nТекст взял из последнего поиска." if data.get("prefilled") else ""
+        await message.answer("Принял. Осталось: " + ", ".join(missing) + note, reply_markup=kb())
         return
 
-    # всё собрано — сохраняем
+    # текст подставлен из поиска — просим подтвердить, чтобы не сохранить не тот
+    if data.get("prefilled"):
+        snippet = data["text"] if len(data["text"]) <= 200 else data["text"][:200] + "…"
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Сохранить с этим текстом", callback_data="save_prefilled")
+            ]]
+        )
+        await message.answer(
+            f"Всё собрано. Текст взят из последнего поиска:\n«{snippet}»\n\n"
+            "Если это тот отзыв — нажми кнопку. Если нет — пришли правильный текст.",
+            reply_markup=markup,
+        )
+        return
+
+    await finalize(message, state, data, message.from_user.id)
+
+
+async def finalize(message: Message, state: FSMContext, data: dict, user_id: int):
+    """Сохраняет собранный отзыв (или предлагает заменить дубль)."""
     tn = norm(data["text"])
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -261,7 +292,7 @@ async def collect(message: Message, state: FSMContext):
         if exists:
             old_id, photo, link, old_text = exists
             snippet = old_text if len(old_text) <= 300 else old_text[:300] + "…"
-            PENDING_DUP[message.from_user.id] = dict(data)
+            PENDING_DUP[user_id] = dict(data)
             markup = InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(text="🔁 Заменить старую новой", callback_data=f"dup_replace:{old_id}"),
@@ -280,8 +311,24 @@ async def collect(message: Message, state: FSMContext):
             )
             await db.commit()
             mark_dirty()
-            await message.answer("✅ Сохранено в базу.", reply_markup=kb())
+            await message.answer(
+                f"✅ Сохранено в базу.\n«{data['text'][:80]}»", reply_markup=kb()
+            )
     await state.clear()
+
+
+@router.callback_query(F.data == "save_prefilled")
+async def save_prefilled(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not all(k in data for k in ("photo", "text", "link")):
+        await call.answer("Данные устарели, начни добавление заново", show_alert=True)
+        return
+    await call.answer()
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await finalize(call.message, state, data, call.from_user.id)
 
 
 @router.message(CommandStart())
@@ -290,7 +337,7 @@ async def start(message: Message, state: FSMContext):
     await message.answer(
         "Привет! Как пользоваться:\n\n"
         "• Добавить отзыв: перешли скрин, текст и ссылку (каждое отдельным сообщением, в любом порядке). Из сообщения со ссылкой бот берёт только ссылку. "
-        "Если начинаешь с текста — сначала нажми «➕ Добавить».\n"
+        "Если текст не нашёлся в базе, просто пришли скрин и ссылку — он сохранится с этим текстом.\n"
         "• Найти: просто отправь текст отзыва — пришлю скрин и ссылку, а отзыв попадёт в пройденные.\n"
         "• Кнопка «✅ Пройденные» — пройденные по порядку: ссылка и её скрины со ссылками.\n"
         "• Кнопка «↩️ Убрать из пройденных» — убрать отдельные отзывы из списка.\n"
@@ -342,6 +389,7 @@ async def passed_list(message: Message):
 @router.message(F.text == BTN_CANCEL)
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
+    LAST_NOTFOUND.pop(message.from_user.id, None)
     await message.answer("Отменено. Теперь я в режиме поиска.", reply_markup=kb())
 
 
@@ -501,6 +549,20 @@ async def dup_keep(call: CallbackQuery):
     await call.answer()
 
 
+@router.message(Command("list"))
+async def list_records(message: Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, text, passed FROM reviews ORDER BY id DESC LIMIT 20"
+        )
+        rows = await cur.fetchall()
+    if not rows:
+        await message.answer("База пустая.")
+        return
+    lines = [f"{'✅' if p else '▫️'} #{i}: {t[:60]}" for i, t, p in rows]
+    await message.answer("Последние записи (✅ = пройден):\n" + "\n".join(lines))
+
+
 @router.message(Command("id"))
 async def my_id(message: Message):
     await message.answer(f"Твой Telegram ID: {message.from_user.id}")
@@ -581,7 +643,10 @@ async def search(message: Message):
                 scored.append((score, rid, text, photo, link, passed))
 
         if not scored:
-            await message.answer("Такого текста в базе нет.")
+            LAST_NOTFOUND[message.from_user.id] = (time.time(), message.text)
+            await message.answer(
+                "Такого текста в базе нет. Чтобы добавить его, пришли скрин и ссылку."
+            )
             return
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -606,6 +671,7 @@ async def search(message: Message):
             return
 
     # неуверенно — ничего не отмечаем, даём выбрать
+    LAST_NOTFOUND[message.from_user.id] = (time.time(), message.text)
     await message.answer("Точного совпадения нет. Возможно, это один из них:")
     for score, rid, text, photo, link, passed in scored[:MAX_RESULTS]:
         snippet = text if len(text) <= 300 else text[:300] + "…"
